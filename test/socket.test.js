@@ -196,3 +196,62 @@ test('R6.4 / NF1 character list reaches every player, including late joiners; no
   assert.equal((await call(p2, 'addCharacters', { text: 'Sneaky' })).code, 'NOT_HOST');
   assert.equal((await call(p2, 'clearCharacters', {})).code, 'NOT_HOST');
 });
+
+async function startedRoom(over = {}) {
+  const { host, roomId } = await hostRoom(over);
+  const p2 = client(); const p3 = client();
+  await call(p2, 'join', { roomId, name: 'Nami', token: p2.token });
+  await call(p3, 'join', { roomId, name: 'Usopp', token: p3.token });
+  await waitFor(() => host.last.players.length === 3);
+  await call(host, 'addCharacters', { text: Array.from({ length: 40 }, (_, i) => `Char ${i + 1}`).join('\n') });
+  assert.ok((await call(host, 'start', {})).ok);
+  await waitFor(() => [host, p2, p3].every((c) => c.last?.phase === 'draft'));
+  const byId = new Map([[host.last.you, host], [p2.last.you, p2], [p3.last.you, p3]]);
+  return { host, p2, p3, roomId, byId };
+}
+
+test('R1.4 / NF1 a full draft over the wire: every screen agrees at the end', async () => {
+  const { host, p2, p3, byId } = await startedRoom();
+  for (let turn = 0; turn < 15; turn += 1) {
+    await waitFor(() => host.last.draft?.turn);
+    const active = byId.get(host.last.draft.turn.playerId);
+    assert.ok((await call(active, 'spin', {})).ok);
+    await waitFor(() => active.last.draft.turn?.stage === 'landed');
+    const role = active.last.draft.teams[active.last.you].indexOf(null);
+    assert.ok((await call(active, 'place', { role })).ok);
+    await waitFor(() => host.last.version >= active.last.version);
+  }
+  await waitFor(() => [host, p2, p3].every((c) => c.last.phase === 'drafted'));
+  assert.deepEqual(p2.last.draft.teams, host.last.draft.teams);
+  assert.deepEqual(p3.last.draft.teams, host.last.draft.teams);
+  const all = Object.values(host.last.draft.teams).flat();
+  assert.equal(new Set(all).size, 15, 'nobody shares a character');
+});
+
+test('T8.01 everyone sees the same spin result live', async () => {
+  const { host, p2, p3 } = await startedRoom();
+  await call(host, 'spin', {});
+  await waitFor(() => [p2, p3].every((c) => c.last.draft.turn?.spin));
+  assert.equal(p2.last.draft.turn.spin.landed, host.last.draft.turn.spin.landed);
+  assert.equal(p3.last.draft.turn.spin.landed, host.last.draft.turn.spin.landed);
+  assert.deepEqual(p3.last.draft.turn.spin.wheel, host.last.draft.turn.spin.wheel);
+});
+
+test('T8.13 the server applies a timeout by itself when the timer runs out', async () => {
+  const { host, p3, roomId } = await startedRoom({ timerEnabled: true, timerSeconds: 15 });
+  await call(host, 'spin', {});
+  const room = server.rooms.get(roomId);
+  room.draft.turn.deadline = Date.now() + 150; // shorten for the test
+  await call(host, 'voteKick', { playerId: p3.last.you }); // any action that re-broadcasts
+  await waitFor(() => p3.last.draft.turn?.playerId !== host.last.you, 3000);
+  assert.ok(p3.last.draft.log.some((e) => e.kind === 'timeout'));
+});
+
+test('T8.22 vote-kick over the wire: the kicked player is told', async () => {
+  const { host, p2, p3 } = await startedRoom();
+  await call(host, 'voteKick', { playerId: p3.last.you });
+  await waitFor(() => p2.last.kickVotes[p3.last.you]?.votes === 1);
+  const res = await call(p2, 'voteKick', { playerId: p3.last.you });
+  assert.equal(res.kicked, true);
+  await waitFor(() => p3.events.some(([e]) => e === 'kicked'));
+});

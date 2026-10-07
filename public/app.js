@@ -1,5 +1,6 @@
 // Battle Draft client. Renders screens from server state; the server decides everything that matters.
 /* global io */
+import { Wheel } from './wheel.js';
 
 const socket = io({ transports: ['websocket', 'polling'] });
 const $app = document.getElementById('app');
@@ -45,6 +46,13 @@ const state = {
   importResult: null,
   importing: false,
   confirmClear: null,
+  // draft
+  wheel: null,
+  clockOffset: 0, // server time minus local time
+  animatingSpin: null,
+  shownSpinId: null,
+  keepChoice: 'new',
+  img: new Map(), // charId -> 'loading' | 'ok' | 'fail'
   form: {
     name: store.get('bd-name') || '', roomName: '', visibility: 'private', roleCount: 5,
     roles: Array(10).fill(''), cap: 8, turnOrder: 'join', releasedHoldToBin: 'yes', timer: 'off',
@@ -124,6 +132,8 @@ async function enterRoom(name) {
 
 // ---------- socket events ----------
 socket.on('room', (view) => {
+  if (view.draft) state.clockOffset = view.draft.serverNow - Date.now();
+  if (view.draft?.turn?.stage === 'landed' || view.draft?.turn?.stage === 'spin') state.keepChoice = 'new';
   state.view = view;
   state.roomId = view.id;
   if (state.screen !== 'room') { state.screen = 'room'; state.error = ''; window.scrollTo(0, 0); }
@@ -211,6 +221,20 @@ const actions = {
   askReport(el) { state.reportFor = el.dataset.id; state.confirmKick = null; render(); document.getElementById('report-reason')?.focus(); },
   cancelReport() { state.reportFor = null; render(); },
   async start() { const r = await emit('start'); if (!r.ok) toast(r.message); },
+  async spin() { const r = await emit('spin'); if (!r.ok) toast(r.message); },
+  async hold() { const r = await emit('hold'); if (!r.ok) toast(r.message); },
+  async binIt() { const r = await emit('bin'); if (!r.ok) toast(r.message); },
+  pickKeep(el) { state.keepChoice = el.dataset.choice; render(); },
+  async placeRole(el) {
+    const role = Number(el.dataset.role);
+    const stage = state.view?.draft?.turn?.stage;
+    const r = stage === 'compare' ? await emit('keep', { choice: state.keepChoice, role }) : await emit('place', { role });
+    if (!r.ok) toast(r.message);
+  },
+  async voteKick(el) {
+    const r = await emit('voteKick', { playerId: el.dataset.id });
+    if (!r.ok) toast(r.message); else if (r.kicked) toast('Player removed by vote', true);
+  },
   charTab(el) { state.charTab = el.dataset.tab; state.importResult = null; render(); },
   dismissResult() { state.importResult = null; render(); },
   async removeChar(el) { const r = await emit('removeCharacter', { id: el.dataset.id }); if (!r.ok) toast(r.message); },
@@ -621,15 +645,245 @@ function lobbyScreen(v) {
     </div>`;
 }
 
-function draftScreen(v) {
-  const name = (id) => v.players.find((p) => p.id === id)?.name ?? 'Left the game';
+// ---------- draft screen ----------
+const serverNow = () => Date.now() + state.clockOffset;
+const charById = () => {
+  if (state.charMapVersion !== state.characters.version) {
+    state.charMap = new Map(state.characters.list.map((c) => [c.id, c]));
+    state.charNameMap = new Map(state.characters.list.map((c) => [c.id, c.name]));
+    state.charMapVersion = state.characters.version;
+  }
+  return state.charMap;
+};
+const charName = (id) => charById().get(id)?.name ?? 'Unknown';
+const pName = (v, id) => v.names?.[id] ?? 'A player';
+
+// R7.4: load an image in the background; give up after 4 seconds and show the name instead.
+function loadImage(id) {
+  const c = charById().get(id);
+  if (!c?.image || state.img.has(id)) return;
+  state.img.set(id, 'loading');
+  const img = new Image();
+  img.referrerPolicy = 'no-referrer';
+  const done = (ok) => { if (state.img.get(id) !== 'loading') return; state.img.set(id, ok ? 'ok' : 'fail'); render(); };
+  img.onload = () => done(true);
+  img.onerror = () => done(false);
+  setTimeout(() => done(false), 4000);
+  img.src = c.image;
+}
+
+function charCard(id, label, { selectable = false, choice = '', selected = false } = {}) {
+  const c = charById().get(id);
+  const showImg = c?.image && state.img.get(id) === 'ok';
+  const inner = html`
+    ${label ? html`<span class="card-label">${label}</span>` : ''}
+    ${showImg ? html`<img src="${c.image}" alt="" referrerpolicy="no-referrer">` : ''}
+    <span class="card-name">${c?.name ?? 'Unknown'}</span>
+    ${c?.verse ? html`<span class="card-verse">${c.verse}</span>` : ''}`;
+  return selectable
+    ? html`<button class="char-card selectable ${selected ? 'selected' : ''}" data-action="pickKeep" data-choice="${choice}" aria-pressed="${selected}">${inner}</button>`
+    : html`<div class="char-card">${inner}</div>`;
+}
+
+function formation(v, pid, { interactive = false, compact = false } = {}) {
+  const team = v.draft.teams[pid] || [];
   return html`
-    <header class="lobby-title"><h2>The draft has begun</h2><p>${v.settings.roomName}</p></header>
-    <section class="panel">
-      <h3>Turn order</h3>
-      <ol class="role-list">${v.turnOrder.map((id, i) => html`<li><span class="pos" aria-hidden="true">${i + 1}</span><span>${name(id)}${id === v.you ? ' (you)' : ''}</span></li>`)}</ol>
-      <p class="hint" style="margin-top:14px">The wheel arrives in build phase 3.</p>
-    </section>`;
+    <ol class="formation ${compact ? 'compact' : ''}">${v.settings.roles.map((role, i) => {
+      const id = team[i];
+      const canPlace = interactive && id == null;
+      return html`<li class="${id == null ? 'empty' : ''}">
+        <span class="pos" aria-hidden="true">${i + 1}</span>
+        <span class="slot-role">${role}</span>
+        ${canPlace
+          ? html`<button class="btn btn-small btn-primary place-btn" data-action="placeRole" data-role="${i}">Place here</button>`
+          : html`<span class="slot-char">${id == null ? 'Empty' : charName(id)}</span>`}
+      </li>`;
+    })}</ol>`;
+}
+
+function logLine(v, e) {
+  const p = html`<strong>${pName(v, e.playerId)}</strong>`;
+  const role = (i) => v.settings.roles[i] ?? `role ${i + 1}`;
+  switch (e.kind) {
+    case 'placed': return html`${p} placed ${charName(e.charId)} as ${role(e.role)}.`;
+    case 'held': return html`${p} is holding ${charName(e.charId)}.`;
+    case 'binned': return html`${p} binned ${charName(e.charId)}.`;
+    case 'keptNew': return html`${p} kept ${charName(e.charId)} as ${role(e.role)}. ${charName(e.released)} ${e.releasedTo === 'bin' ? 'went in the bin' : 'went back on the wheel'}.`;
+    case 'keptHeld': return html`${p} kept ${charName(e.charId)} as ${role(e.role)}. ${charName(e.released)} went in the bin.`;
+    case 'timeout': return html`${p} ${e.reason === 'inactive' ? 'was skipped after disconnecting' : 'ran out of time'}.${e.returned ? html` ${charName(e.returned)} went back on the wheel.` : ''}`;
+    case 'timeoutHeld': return html`${p} ran out of time. Their held ${charName(e.charId)} went in as ${role(e.role)}.`;
+    case 'removed': return html`${p} left the game. Their characters went back on the wheel.`;
+    default: return '';
+  }
+}
+
+function actionArea(v) {
+  const d = v.draft;
+  const t = d.turn;
+  if (!t) return '';
+  const mine = t.playerId === v.you;
+  const who = pName(v, t.playerId);
+  const revealed = t.spin && state.shownSpinId === t.spin.id;
+  const binsLeft = d.binsLeft[v.you] ?? 0;
+  const holdsLeft = d.holdsLeft[v.you] ?? 0;
+
+  if (t.stage === 'spin') {
+    const afterBin = t.usedBailout;
+    return mine
+      ? html`<p class="prompt">${afterBin ? 'Binned. Spin again — this time you must place who you land.' : 'Your turn. Spin the wheel!'}</p>
+          <button class="btn btn-primary btn-block spin-btn" data-action="spin">Spin</button>`
+      : html`<p class="prompt">Waiting for ${who} to spin…</p>`;
+  }
+  if (t.stage === 'held') {
+    return html`${charCard(t.held, 'Holding')}
+      ${mine ? html`<p class="prompt">Spin again. Then keep whichever is better.</p><button class="btn btn-primary btn-block spin-btn" data-action="spin">Spin again</button>`
+        : html`<p class="prompt">${who} is holding ${charName(t.held)} and spinning again…</p>`}`;
+  }
+  if (!revealed) return html`${t.held != null ? charCard(t.held, 'Holding') : ''}<p class="prompt">Spinning…</p>`;
+
+  if (t.stage === 'landed') {
+    return html`${charCard(t.landed, mine ? 'You landed' : `${who} landed`)}
+      ${mine ? html`
+        <p class="prompt">Tap an empty role to place ${charName(t.landed)}.</p>
+        <div class="bail">
+          <button class="btn" data-action="hold" ${raw(t.usedBailout || holdsLeft < 1 ? 'disabled' : '')}>Hold <small>${holdsLeft} left</small></button>
+          <button class="btn btn-danger" data-action="binIt" ${raw(t.usedBailout || binsLeft < 1 ? 'disabled' : '')}>Bin <small>${binsLeft} left</small></button>
+        </div>
+        ${t.usedBailout ? html`<p class="hint center">One hold or bin per turn. Place this one.</p>` : ''}`
+      : html`<p class="prompt">${who} is choosing a role…</p>`}`;
+  }
+  // compare: holding one, second spin landed
+  const heldGoes = v.settings.releasedHoldToBin ? 'goes in the bin' : 'goes back on the wheel';
+  return html`
+    <div class="compare">
+      ${charCard(t.held, 'Held', { selectable: mine, choice: 'held', selected: mine && state.keepChoice === 'held' })}
+      ${charCard(t.landed, 'New spin', { selectable: mine, choice: 'new', selected: mine && state.keepChoice === 'new' })}
+    </div>
+    ${mine ? html`<p class="prompt">Keep ${charName(state.keepChoice === 'held' ? t.held : t.landed)}, then tap an empty role.</p>
+      <p class="hint center">${state.keepChoice === 'held' ? `${charName(t.landed)} goes in the bin.` : `${charName(t.held)} ${heldGoes}.`}</p>`
+    : html`<p class="prompt">${who} is choosing between them…</p>`}`;
+}
+
+function countdown(v) {
+  const t = v.draft.turn;
+  if (!t?.deadline) return '';
+  return html`<div class="countdown" data-deadline="${t.deadline}" data-total="${v.draft.timerMs}"><div class="bar"></div><span class="secs"></span></div>`;
+}
+
+function tickCountdown() {
+  const el = document.querySelector('.countdown');
+  if (!el) return;
+  const left = Math.max(0, Number(el.dataset.deadline) - serverNow());
+  const total = Number(el.dataset.total) || 1;
+  el.querySelector('.bar').style.width = `${Math.min(100, (left / total) * 100)}%`;
+  el.querySelector('.secs').textContent = `${Math.ceil(left / 1000)}s`;
+  el.classList.toggle('urgent', left < 5000);
+}
+setInterval(tickCountdown, 250);
+
+function draftPlayers(v) {
+  const d = v.draft;
+  const t = d.turn;
+  return html`<ul class="list">${d.order.map((pid) => {
+    const p = v.players.find((x) => x.id === pid);
+    if (!p) return '';
+    const team = d.teams[pid] || [];
+    const filled = team.filter((x) => x != null).length;
+    const isActive = t?.playerId === pid;
+    const votes = v.kickVotes?.[pid];
+    const canVote = pid !== v.you && (!p.connected || (isActive && !d.timerMs));
+    const iVoted = votes?.voters?.includes(v.you);
+    return html`<li class="${p.connected ? '' : 'away'}">
+      <span class="grow">${p.name}${isActive ? html` <span class="badge">Turn</span>` : ''}${pid === v.you ? html` <span class="badge you">You</span>` : ''}</span>
+      <span class="progress">${filled}/${d.roleCount}</span>
+      ${canVote ? html`<button class="btn btn-small" data-action="voteKick" data-id="${pid}" ${raw(iVoted ? 'disabled' : '')}>${iVoted ? 'Voted' : 'Vote to remove'}${votes ? ` ${votes.votes}/${votes.needed}` : ''}</button>` : ''}
+      ${v.isHost && pid !== v.you && state.confirmKick !== pid ? html`<button class="btn btn-small btn-danger" data-action="askKick" data-id="${pid}">Remove</button>` : ''}
+    </li>
+    ${state.confirmKick === pid ? html`<li><div class="inline-form"><p>Remove ${p.name}? Their characters go back on the wheel.</p>
+      <div class="row-actions" style="justify-content:flex-start"><button class="btn btn-small btn-danger" data-action="kick" data-id="${pid}">Remove</button>
+      <button class="btn btn-small" data-action="cancelKick">Cancel</button></div></div></li>` : ''}`;
+  })}</ul>`;
+}
+
+function draftScreen(v) {
+  const d = v.draft;
+  const t = d.turn;
+  const mine = t?.playerId === v.you;
+  const revealed = t?.spin && state.shownSpinId === t.spin.id;
+  const interactive = mine && revealed && (t.stage === 'landed' || t.stage === 'compare');
+  const round = t ? (d.turnsTaken[t.playerId] ?? 0) + 1 : d.roleCount;
+  const myBins = d.binsLeft[v.you];
+  return html`
+    <header class="turn-banner">
+      <p class="round">Round ${round} of ${d.roleCount}</p>
+      <h2>${mine ? 'Your turn' : `${pName(v, t?.playerId)}’s turn`}</h2>
+      ${myBins !== undefined ? html`<p class="tokens"><span>Respins left: ${myBins}</span><span>Hold: ${d.holdsLeft[v.you]}</span></p>` : ''}
+      ${countdown(v)}
+    </header>
+    <div class="draft-grid">
+      <section class="wheel-col">
+        <div id="wheel-slot"></div>
+        <div class="action-area">${actionArea(v)}</div>
+      </section>
+      <section class="team-col">
+        <div class="panel">
+          <h3>${mine ? 'Your team' : `${pName(v, t?.playerId)}’s team`}</h3>
+          ${t ? formation(v, t.playerId, { interactive }) : ''}
+        </div>
+        ${!mine && d.teams[v.you] ? html`<div class="panel"><h3>Your team</h3>${formation(v, v.you, { compact: true })}</div>` : ''}
+        <div class="panel">
+          <h3>What’s happened</h3>
+          ${d.log.length ? html`<ul class="feed">${[...d.log].reverse().slice(0, 8).map((e) => html`<li>${logLine(v, e)}</li>`)}</ul>` : html`<p class="hint">Nothing yet. ${pName(v, t?.playerId)} spins first.</p>`}
+        </div>
+        <div class="panel">
+          <h3>Players</h3>
+          ${draftPlayers(v)}
+        </div>
+        <details class="panel all-teams">
+          <summary><h3>All teams</h3></summary>
+          ${d.order.map((pid) => html`<div class="mini-team"><p class="mini-name">${pName(v, pid)}</p>${formation(v, pid, { compact: true })}</div>`)}
+        </details>
+      </section>
+    </div>`;
+}
+
+function draftedScreen(v) {
+  const d = v.draft;
+  return html`
+    <header class="lobby-title"><h2>The draft is complete</h2><p>${v.settings.roomName}</p></header>
+    <div class="stack">
+      ${d.order.map((pid) => html`<section class="panel"><h3>${pName(v, pid)}${pid === v.you ? ' (you)' : ''}</h3>${formation(v, pid, { compact: true })}</section>`)}
+      <p class="why center">Swaps, bin picks and extra spins arrive in build phase 4.</p>
+    </div>`;
+}
+
+// Keeps the persistent wheel in step with the server: segments, and the spin animation.
+function syncWheel(v) {
+  const slot = document.getElementById('wheel-slot');
+  if (!slot) return;
+  if (!state.wheel) state.wheel = new Wheel();
+  const w = state.wheel;
+  if (w.el.parentNode !== slot) slot.appendChild(w.el);
+  const d = v.draft;
+  const t = d.turn;
+  charById();
+  const names = state.charNameMap;
+  const spun = t?.spin && (t.stage === 'landed' || t.stage === 'compare');
+  if (spun) {
+    w.setSegments(t.spin.wheel, names);
+    loadImage(t.spin.landed);
+    if (state.shownSpinId !== t.spin.id && state.animatingSpin !== t.spin.id) {
+      state.animatingSpin = t.spin.id;
+      const elapsed = serverNow() - t.spin.at;
+      w.spinTo(t.spin.landed, {
+        duration: d.spinMs, elapsed, seed: t.spin.id,
+        onDone: () => { state.shownSpinId = t.spin.id; state.animatingSpin = null; render(); },
+      });
+    } else if (!w.spinning) w.showName(charName(t.spin.landed));
+  } else {
+    w.setSegments(d.pool, names);
+    if (!w.spinning) w.showName(t?.held != null ? `Holding ${charName(t.held)}` : '');
+  }
 }
 
 function offlineBar() {
@@ -644,14 +898,23 @@ function render() {
     case 'name': body = nameScreen(); break;
     case 'waiting': body = waitingScreen(); break;
     case 'notice': body = noticeScreen(); break;
-    case 'room': body = state.view?.phase === 'lobby' ? lobbyScreen(state.view) : state.view ? draftScreen(state.view) : html`<p>Loading…</p>`; break;
+    case 'room': {
+      const v = state.view;
+      if (!v) body = html`<p>Loading…</p>`;
+      else if (v.phase === 'lobby') body = lobbyScreen(v);
+      else if (v.phase === 'draft') body = draftScreen(v);
+      else body = draftedScreen(v);
+      break;
+    }
     default: body = homeScreen();
   }
   // Keep focus and cursor position across re-renders.
   const active = document.activeElement;
   const key = active?.dataset?.field || active?.id;
   const sel = active && 'selectionStart' in active ? [active.selectionStart, active.selectionEnd] : null;
+  $app.classList.toggle('wide', state.screen === 'room' && state.view?.phase === 'draft');
   $app.innerHTML = fmt(html`${state.screen === 'room' ? offlineBar() : ''}${body}`);
+  if (state.screen === 'room' && state.view?.phase === 'draft') { syncWheel(state.view); tickCountdown(); }
   if (key) {
     const el = $app.querySelector(`[data-field="${CSS.escape(key)}"]`) || document.getElementById(key);
     if (el && el.type !== 'radio') { el.focus({ preventScroll: true }); if (sel && 'setSelectionRange' in el) try { el.setSelectionRange(...sel); } catch { /* number inputs */ } }

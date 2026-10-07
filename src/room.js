@@ -6,6 +6,7 @@ import {
   PLACEMENT_TIMER_OPTIONS, maxPlayersFor, minimumPool,
 } from './config.js';
 import { parseText, mergeCharacters } from './characters.js';
+import { Draft, DraftError } from './draft.js';
 import { isProfane } from './profanity.js';
 import { shortId } from './ids.js';
 
@@ -78,6 +79,9 @@ export class Room {
     this.version = 0; // bumps on every change, handy for clients and tests
     this.characters = []; // [{ id, name, image, verse }] — the original list, kept for restarts
     this.charVersion = 0;
+    this.draft = null;
+    this.kickVotes = new Map(); // targetId -> Set of voter ids (R8.8)
+    this.random = undefined; // tests can inject a deterministic wheel
     const host = this.#addPlayer(hostToken, validateName(hostName), now);
     this.hostId = host.id;
   }
@@ -186,6 +190,33 @@ export class Room {
     return target;
   }
 
+  // R8.8: players vote to remove an inactive player. A majority of the other connected players decides.
+  voteKick(voterId, targetId, now = Date.now()) {
+    if (this.phase === 'lobby') throw new GameError('LOBBY_KICK', 'In the lobby, only the host can remove players.');
+    if (voterId === targetId) throw new GameError('KICK_SELF', 'You can’t vote to remove yourself.');
+    if (!this.player(voterId)) throw new GameError('NOT_IN_ROOM', 'You’re not in this game.');
+    const target = this.player(targetId);
+    if (!target) throw new GameError('NO_PLAYER', 'That player has already left.');
+    const votes = this.kickVotes.get(targetId) || new Set();
+    votes.add(voterId);
+    this.kickVotes.set(targetId, votes);
+    const { needed } = this.kickTally(targetId);
+    this.#touch();
+    if (votes.size >= needed) {
+      this.banned.add(target.token);
+      this.#removePlayer(targetId, now);
+      if (targetId === this.hostId) this.#handOverHost(targetId);
+      return { kicked: true, target };
+    }
+    return { kicked: false, votes: votes.size, needed };
+  }
+
+  kickTally(targetId) {
+    const eligible = this.players.filter((p) => p.id !== targetId && p.connected).length;
+    const votes = [...(this.kickVotes.get(targetId) || [])].filter((v) => this.player(v));
+    return { votes: votes.length, voters: votes, needed: Math.floor(eligible / 2) + 1 };
+  }
+
   report(byId, targetId, reason, now = Date.now()) {
     this.#requireHost(byId);
     const target = this.player(targetId);
@@ -235,9 +266,15 @@ export class Room {
     this.#touch();
   }
 
-  #removePlayer(id) {
+  #removePlayer(id, now = Date.now()) {
     this.players = this.players.filter((p) => p.id !== id);
     this.turnOrder = this.turnOrder.filter((t) => t !== id);
+    this.kickVotes.delete(id);
+    for (const votes of this.kickVotes.values()) votes.delete(id);
+    if (this.draft && !this.draft.finished) {
+      this.draft.removePlayer(id, now);
+      this.#afterDraftChange();
+    }
     this.#touch();
   }
 
@@ -298,7 +335,7 @@ export class Room {
     return reasons;
   }
 
-  start(byId, rng = Math.random) {
+  start(byId, rng = Math.random, now = Date.now()) {
     this.#requireHost(byId);
     this.#requireLobby();
     const blockers = this.startBlockers();
@@ -313,7 +350,59 @@ export class Room {
     this.turnOrder = order;
     this.requests = [];
     this.phase = 'draft';
+    this.nameCache = Object.fromEntries(this.players.map((p) => [p.id, p.name])); // names survive players leaving
+    this.draft = new Draft({
+      characterIds: this.characters.map((c) => c.id),
+      turnOrder: order,
+      roleCount: this.settings.roleCount,
+      timerSeconds: this.settings.timerEnabled ? this.settings.timerSeconds : 0,
+      releasedHoldToBin: this.settings.releasedHoldToBin,
+      ...(this.random ? { random: this.random } : {}),
+    });
+    this.draft.begin(now);
     this.#touch();
+  }
+
+  // ---------- the draft (phase 3) ----------
+  draftAction(playerId, action, payload = {}, now = Date.now()) {
+    if (this.phase !== 'draft' || !this.draft) throw new GameError('NOT_DRAFTING', 'The draft isn’t running.');
+    try {
+      switch (action) {
+        case 'spin': this.draft.spin(playerId, now); break;
+        case 'place': this.draft.place(playerId, payload.role, now); break;
+        case 'hold': this.draft.hold(playerId, now); break;
+        case 'bin': this.draft.bin(playerId, now); break;
+        case 'keep': this.draft.keep(playerId, payload.choice, payload.role, now); break;
+        default: throw new GameError('BAD_ACTION', 'Unknown action.');
+      }
+    } catch (err) {
+      if (err instanceof DraftError) throw new GameError(err.code, err.message);
+      throw err;
+    }
+    this.#afterDraftChange();
+    this.#touch();
+  }
+
+  #afterDraftChange() {
+    if (this.draft?.finished && this.phase === 'draft') this.phase = 'drafted'; // phase 4 picks up from here
+  }
+
+  // When the server should next check the current turn (timer or inactive player), or null.
+  turnDueAt() {
+    if (this.phase !== 'draft' || !this.draft?.turn) return null;
+    const active = this.player(this.draft.turn.playerId);
+    return this.draft.dueAt({ activeConnected: active?.connected ?? false, activeDisconnectedAt: active?.disconnectedAt ?? null });
+  }
+
+  // Applies a timeout if the current turn is due. Returns true if anything changed.
+  tick(now = Date.now()) {
+    const due = this.turnDueAt();
+    if (due == null || now < due) return false;
+    const reason = this.draft.turn.deadline ? 'timer' : 'inactive';
+    this.draft.timeout(now, reason);
+    this.#afterDraftChange();
+    this.#touch();
+    return true;
   }
 
   // ---------- what each person is allowed to see ----------
@@ -335,6 +424,9 @@ export class Room {
       charVersion: this.charVersion,
       poolNeeded: minimumPool(Math.max(this.connectedPlayers.length, MIN_PLAYERS), this.settings.roleCount),
       poolForCap: minimumPool(this.settings.cap, this.settings.roleCount),
+      draft: this.draft ? this.draft.view(Date.now()) : null,
+      names: { ...(this.nameCache || {}), ...Object.fromEntries(this.players.map((p) => [p.id, p.name])) },
+      kickVotes: this.phase === 'lobby' ? {} : Object.fromEntries(this.players.map((p) => [p.id, this.kickTally(p.id)]).filter(([, t]) => t.votes > 0)),
     };
   }
 

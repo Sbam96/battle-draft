@@ -20,6 +20,7 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
   const reports = []; // read by the admin page in phase 6
   const graceTimers = new Map(); // `${roomId}:${playerId}` -> timeout
   const emptyTimers = new Map(); // roomId -> timeout
+  const turnTimers = new Map(); // roomId -> timeout for the current turn's deadline or inactivity skip
 
   app.disable('x-powered-by');
   app.use((req, res, next) => {
@@ -41,7 +42,19 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
     (target || io.to(`r:${room.id}`)).emit('characters', room.charactersPayload());
   }
 
+  // The server owns the clock: when a turn runs out, it applies the timeout itself.
+  function scheduleTurn(room) {
+    clearTimeout(turnTimers.get(room.id));
+    const due = room.turnDueAt();
+    if (due == null) return;
+    turnTimers.set(room.id, setTimeout(() => {
+      if (room.tick(Date.now())) broadcast(room);
+      else scheduleTurn(room);
+    }, Math.max(0, due - Date.now()) + 25).unref());
+  }
+
   function broadcast(room) {
+    scheduleTurn(room);
     for (const p of room.players) io.to(`p:${room.id}:${p.id}`).emit('room', room.viewFor(p.id));
     io.to(`req:${room.id}`).emit('requestStatus', { pending: true }); // keeps waiting screens alive
     io.to('browse').emit('publicRooms', publicList());
@@ -52,7 +65,7 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
     if (!room.isEmpty()) return;
     emptyTimers.set(room.id, setTimeout(() => {
       if (room.isEmpty()) { rooms.delete(room.id); io.to('browse').emit('publicRooms', publicList()); }
-    }, emptyRoomTtlMs));
+    }, emptyRoomTtlMs).unref());
   }
 
   function attach(socket, room, player) {
@@ -71,7 +84,7 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
     graceTimers.set(key, setTimeout(() => {
       graceTimers.delete(key);
       if (room.expireGrace(playerId)) { broadcast(room); scheduleEmptyCheck(room); }
-    }, graceMs));
+    }, graceMs).unref());
   }
 
   // Simple per-connection rate limit: 40 actions per 10 seconds (NF5).
@@ -223,6 +236,26 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
       room.clearCharacters(socket.data.playerId, verse);
       sendCharacters(room);
       broadcast(room);
+    });
+
+    for (const action of ['spin', 'place', 'hold', 'bin', 'keep']) {
+      on(action, (payload) => {
+        const room = currentRoom();
+        room.draftAction(socket.data.playerId, action, payload);
+        broadcast(room);
+      });
+    }
+
+    on('voteKick', ({ playerId }) => {
+      const room = currentRoom();
+      const res = room.voteKick(socket.data.playerId, playerId);
+      if (res.kicked) {
+        const targetRoom = `p:${room.id}:${res.target.id}`;
+        io.to(targetRoom).emit('kicked', { roomName: room.settings.roomName, byVote: true });
+        io.in(targetRoom).socketsLeave([`r:${room.id}`, targetRoom]);
+      }
+      broadcast(room);
+      return { kicked: res.kicked };
     });
 
     on('start', () => {
