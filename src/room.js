@@ -3,8 +3,9 @@
 
 import {
   ROLE_COUNTS, MIN_PLAYERS, NAME_MAX, ROLE_NAME_MAX, ROOM_NAME_MAX,
-  PLACEMENT_TIMER_OPTIONS, maxPlayersFor,
+  PLACEMENT_TIMER_OPTIONS, maxPlayersFor, minimumPool,
 } from './config.js';
+import { parseText, mergeCharacters } from './characters.js';
 import { isProfane } from './profanity.js';
 import { shortId } from './ids.js';
 
@@ -75,6 +76,8 @@ export class Room {
     this.turnOrder = [];
     this.nextJoinIndex = 0;
     this.version = 0; // bumps on every change, handy for clients and tests
+    this.characters = []; // [{ id, name, image, verse }] — the original list, kept for restarts
+    this.charVersion = 0;
     const host = this.#addPlayer(hostToken, validateName(hostName), now);
     this.hostId = host.id;
   }
@@ -240,11 +243,58 @@ export class Room {
 
   isEmpty() { return this.connectedPlayers.length === 0; }
 
+  // ---------- characters (host only, before the draft) ----------
+  addCharacters(byId, { text, source = 'paste', verse = '' } = {}) {
+    this.#requireHost(byId);
+    this.#requireLobby();
+    const listName = clean(verse).slice(0, 40);
+    let parsed;
+    let merged;
+    try {
+      parsed = parseText(text, { source: source === 'csv' ? 'csv' : 'paste' });
+      if (!parsed.entries.length) throw new GameError('NO_CHARACTERS', 'No characters found. Put one name per line, or separate names with commas.');
+      merged = mergeCharacters(this.characters, parsed.entries, { verse: listName });
+    } catch (err) {
+      if (err instanceof GameError) throw err;
+      throw new GameError(err.code || 'BAD_LIST', err.message);
+    }
+    for (const c of merged.added) this.characters.push({ id: shortId(), ...c });
+    this.charVersion += 1;
+    this.#touch();
+    return { added: merged.added.length, duplicates: merged.duplicates, notes: parsed.notes, total: this.characters.length };
+  }
+
+  removeCharacter(byId, charId) {
+    this.#requireHost(byId);
+    this.#requireLobby();
+    const before = this.characters.length;
+    this.characters = this.characters.filter((c) => c.id !== charId);
+    if (this.characters.length === before) throw new GameError('NO_CHARACTER', 'That character is already gone.');
+    this.charVersion += 1;
+    this.#touch();
+  }
+
+  clearCharacters(byId, verse) {
+    this.#requireHost(byId);
+    this.#requireLobby();
+    this.characters = verse === undefined ? [] : this.characters.filter((c) => c.verse !== verse);
+    this.charVersion += 1;
+    this.#touch();
+  }
+
+  charactersPayload() {
+    return { version: this.charVersion, list: this.characters.map(({ id, name, image, verse }) => ({ id, name, image, verse })) };
+  }
+
   // ---------- starting ----------
   startBlockers() {
     const reasons = [];
     const n = this.connectedPlayers.length;
     if (n < MIN_PLAYERS) reasons.push(`Waiting for players: ${n} of at least ${MIN_PLAYERS}.`);
+    const need = minimumPool(Math.max(n, MIN_PLAYERS), this.settings.roleCount);
+    if (this.characters.length < need) {
+      reasons.push(`Add more characters: ${this.characters.length} of ${need} needed for ${Math.max(n, MIN_PLAYERS)} players.`);
+    }
     return reasons;
   }
 
@@ -281,6 +331,10 @@ export class Room {
       requests: isHost ? this.requests.map((r) => ({ id: r.id, name: r.name, at: r.at })) : [],
       turnOrder: this.turnOrder,
       startBlockers: this.startBlockers(),
+      characterCount: this.characters.length,
+      charVersion: this.charVersion,
+      poolNeeded: minimumPool(Math.max(this.connectedPlayers.length, MIN_PLAYERS), this.settings.roleCount),
+      poolForCap: minimumPool(this.settings.cap, this.settings.roleCount),
     };
   }
 

@@ -25,6 +25,8 @@ function client() {
   c.last = null;
   c.events = [];
   c.on('room', (v) => { c.last = v; });
+  c.chars = null;
+  c.on('characters', (p) => { c.chars = p; });
   for (const e of ['admitted', 'declined', 'kicked', 'publicRooms']) c.on(e, (p) => c.events.push([e, p]));
   clients.push(c);
   return c;
@@ -172,7 +174,25 @@ test('T5.06 host starts with 3 players; everyone sees the draft begin in join or
   await call(p2, 'join', { roomId, name: 'Nami', token: p2.token });
   await call(p3, 'join', { roomId, name: 'Usopp', token: p3.token });
   await waitFor(() => host.last.players.length === 3);
+  const chars = Array.from({ length: 40 }, (_, i) => `Char ${i + 1}`).join('\n');
+  assert.ok((await call(host, 'addCharacters', { text: chars })).ok);
   assert.ok((await call(host, 'start', {})).ok);
   await waitFor(() => p3.last.phase === 'draft');
   assert.deepEqual(p3.last.turnOrder.map((id) => p3.last.players.find((x) => x.id === id).name), ['Ste', 'Nami', 'Usopp']);
+});
+
+test('R6.4 / NF1 character list reaches every player, including late joiners; non-hosts cannot edit it', async () => {
+  const { host, roomId } = await hostRoom();
+  const p2 = client();
+  await call(p2, 'join', { roomId, name: 'Nami', token: p2.token });
+  const res = await call(host, 'addCharacters', { text: 'Luffy\nZoro\nluffy', verse: 'One Piece' });
+  assert.equal(res.added, 2);
+  assert.deepEqual(res.duplicates, ['luffy']);
+  await waitFor(() => p2.chars?.list.length === 2);
+  assert.equal(p2.chars.list[0].verse, 'One Piece');
+  const p3 = client();
+  await call(p3, 'join', { roomId, name: 'Usopp', token: p3.token });
+  await waitFor(() => p3.chars?.list.length === 2);
+  assert.equal((await call(p2, 'addCharacters', { text: 'Sneaky' })).code, 'NOT_HOST');
+  assert.equal((await call(p2, 'clearCharacters', {})).code, 'NOT_HOST');
 });

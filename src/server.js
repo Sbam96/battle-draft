@@ -14,7 +14,7 @@ const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..',
 export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_MS } = {}) {
   const app = express();
   const http = createServer(app);
-  const io = new Server(http, { cors: { origin: false } });
+  const io = new Server(http, { cors: { origin: false }, maxHttpBufferSize: 2e6 });
 
   const rooms = new Map();
   const reports = []; // read by the admin page in phase 6
@@ -37,6 +37,10 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
     .filter((r) => r.settings.visibility === 'public' && r.phase === 'lobby' && !r.isEmpty())
     .map((r) => r.publicSummary());
 
+  function sendCharacters(room, target) {
+    (target || io.to(`r:${room.id}`)).emit('characters', room.charactersPayload());
+  }
+
   function broadcast(room) {
     for (const p of room.players) io.to(`p:${room.id}:${p.id}`).emit('room', room.viewFor(p.id));
     io.to(`req:${room.id}`).emit('requestStatus', { pending: true }); // keeps waiting screens alive
@@ -56,7 +60,9 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
     socket.data.roomId = room.id;
     socket.data.playerId = player.id;
     socket.join(`p:${room.id}:${player.id}`);
+    socket.join(`r:${room.id}`);
     socket.leave(`req:${room.id}`);
+    sendCharacters(room, socket);
   }
 
   function startGrace(room, playerId) {
@@ -177,7 +183,7 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
       const target = room.kick(socket.data.playerId, playerId);
       const targetRoom = `p:${room.id}:${target.id}`;
       io.to(targetRoom).emit('kicked', { roomName: room.settings.roomName });
-      io.in(targetRoom).socketsLeave(targetRoom);
+      io.in(targetRoom).socketsLeave([`r:${room.id}`, targetRoom]);
       broadcast(room);
     });
 
@@ -190,10 +196,33 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
       const room = currentRoom();
       const pid = socket.data.playerId;
       socket.leave(`p:${room.id}:${pid}`);
+      socket.leave(`r:${room.id}`);
       socket.data.roomId = socket.data.playerId = undefined;
       room.leave(pid);
       broadcast(room);
       scheduleEmptyCheck(room);
+    });
+
+    on('addCharacters', ({ text, source, verse }) => {
+      const room = currentRoom();
+      const result = room.addCharacters(socket.data.playerId, { text: String(text ?? ''), source, verse });
+      sendCharacters(room);
+      broadcast(room);
+      return result;
+    });
+
+    on('removeCharacter', ({ id }) => {
+      const room = currentRoom();
+      room.removeCharacter(socket.data.playerId, id);
+      sendCharacters(room);
+      broadcast(room);
+    });
+
+    on('clearCharacters', ({ verse }) => {
+      const room = currentRoom();
+      room.clearCharacters(socket.data.playerId, verse);
+      sendCharacters(room);
+      broadcast(room);
     });
 
     on('start', () => {

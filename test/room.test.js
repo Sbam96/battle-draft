@@ -9,6 +9,8 @@ const roles5 = ['Captain', 'Vice', 'Support', 'Support', 'Wildcard'];
 const roles10 = Array.from({ length: 10 }, (_, i) => `Role ${i + 1}`);
 const base = (over = {}) => ({ roomName: 'Friday Draft', visibility: 'private', roleCount: 5, roles: roles5, cap: 8, turnOrder: 'join', releasedHoldToBin: true, timerEnabled: false, ...over });
 const makeRoom = (over) => new Room({ id: 'r1', settings: base(over), hostName: 'Ste', hostToken: 'tok-host' });
+export const charList = (n) => Array.from({ length: n }, (_, i) => `Char ${i + 1}`).join('\n');
+const fill = (r, n = 60) => r.addCharacters(r.hostId, { text: charList(n) });
 const code = (fn) => { try { fn(); } catch (e) { assert.ok(e instanceof GameError, e.message); return e.code; } return null; };
 
 // ---------- R1.2 / R5.3 roles ----------
@@ -117,7 +119,7 @@ test('R6.2 a pending request reserves its name', () => {
 test('T6.11 game in progress cannot be joined', () => {
   const r = makeRoom();
   r.join('t2', 'Nami'); r.join('t3', 'Usopp');
-  r.start(r.hostId);
+  fill(r); r.start(r.hostId);
   assert.equal(code(() => r.join('t4', 'Robin')), 'GAME_STARTED');
 });
 
@@ -131,6 +133,7 @@ test('T5.05 2 players: start blocked with a reason', () => {
 test('T5.06 3 players: start allowed', () => {
   const r = makeRoom();
   r.join('t2', 'Nami'); r.join('t3', 'Usopp');
+  fill(r);
   assert.deepEqual(r.startBlockers(), []);
   r.start(r.hostId);
   assert.equal(r.phase, 'draft');
@@ -150,7 +153,7 @@ test('T6.16 only the host can start', () => {
 test('T5.10 join order', () => {
   const r = makeRoom();
   r.join('t2', 'Nami'); r.join('t3', 'Usopp');
-  r.start(r.hostId);
+  fill(r); r.start(r.hostId);
   assert.deepEqual(r.turnOrder.map((id) => r.player(id).name), ['Ste', 'Nami', 'Usopp']);
 });
 test('T5.11 shuffle gives a random order that is then fixed', () => {
@@ -158,7 +161,7 @@ test('T5.11 shuffle gives a random order that is then fixed', () => {
   for (let i = 0; i < 30; i += 1) {
     const r = makeRoom({ turnOrder: 'shuffle' });
     r.join('t2', 'Nami'); r.join('t3', 'Usopp'); r.join('t4', 'Robin');
-    r.start(r.hostId);
+    fill(r); r.start(r.hostId);
     orders.add(r.turnOrder.map((id) => r.player(id).name).join(','));
   }
   assert.ok(orders.size > 1, 'shuffle should produce different orders');
@@ -232,7 +235,7 @@ test('T6.23 host reconnects within grace keeps host', () => {
 test('T6.24 host disconnects mid-draft: game continues, old host returns as normal player', () => {
   const r = makeRoom();
   const { player: nami } = r.join('t2', 'Nami'); r.join('t3', 'Usopp');
-  r.start(r.hostId);
+  fill(r); r.start(r.hostId);
   const oldHost = r.hostId;
   r.disconnect(oldHost);
   r.expireGrace(oldHost);

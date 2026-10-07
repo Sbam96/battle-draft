@@ -40,9 +40,15 @@ const state = {
   reportFor: null,
   confirmKick: null,
   notice: null,
+  characters: { version: -1, list: [] },
+  charTab: 'paste',
+  importResult: null,
+  importing: false,
+  confirmClear: null,
   form: {
     name: store.get('bd-name') || '', roomName: '', visibility: 'private', roleCount: 5,
     roles: Array(10).fill(''), cap: 8, turnOrder: 'join', releasedHoldToBin: 'yes', timer: 'off',
+    charName: '', charImage: '', charPaste: '', charVerse: '', charSearch: '',
   },
 };
 
@@ -125,6 +131,10 @@ socket.on('room', (view) => {
   if (state.reportFor && !view.players.some((p) => p.id === state.reportFor)) state.reportFor = null;
   render();
 });
+socket.on('characters', (payload) => {
+  state.characters = payload;
+  if (state.screen === 'room') render();
+});
 socket.on('publicRooms', (rooms) => { state.rooms = rooms; if (state.screen === 'browse') render(); });
 socket.on('admitted', () => enterRoom());
 socket.on('declined', ({ roomName }) => notice('Not this time', `The host of ${roomName} didn’t let you in. Try another game.`));
@@ -143,6 +153,15 @@ async function requestJoin(name) {
   if (!res.ok) { state.error = res.message; if (state.screen !== 'name') go('name'); else render(); return; }
   store.set('bd-name', name);
   go('waiting');
+}
+
+async function importText(text, source, fileName) {
+  state.importing = true; render();
+  const res = await emit('addCharacters', { text, source, verse: state.form.charVerse });
+  state.importing = false;
+  state.importResult = res.ok ? { ...res, fileName } : { error: res.message };
+  render();
+  return res.ok;
 }
 
 const actions = {
@@ -192,6 +211,30 @@ const actions = {
   askReport(el) { state.reportFor = el.dataset.id; state.confirmKick = null; render(); document.getElementById('report-reason')?.focus(); },
   cancelReport() { state.reportFor = null; render(); },
   async start() { const r = await emit('start'); if (!r.ok) toast(r.message); },
+  charTab(el) { state.charTab = el.dataset.tab; state.importResult = null; render(); },
+  dismissResult() { state.importResult = null; render(); },
+  async removeChar(el) { const r = await emit('removeCharacter', { id: el.dataset.id }); if (!r.ok) toast(r.message); },
+  askClear(el) { state.confirmClear = el.dataset.verse ?? '*'; render(); },
+  cancelClear() { state.confirmClear = null; render(); },
+  async clearChars() {
+    const verse = state.confirmClear === '*' ? undefined : state.confirmClear;
+    const r = await emit('clearCharacters', verse === undefined ? {} : { verse });
+    state.confirmClear = null; state.importResult = null;
+    if (!r.ok) toast(r.message); else render();
+  },
+  async uploadFile(el) {
+    const file = el.files?.[0];
+    el.value = '';
+    if (!file) return;
+    if (/\.(xlsx|xlsm|xls|numbers|ods)$/i.test(file.name)) {
+      state.importResult = { error: 'That’s a spreadsheet file. Save it as CSV first (File, Save As, CSV) and upload that.' }; render(); return;
+    }
+    if (!/\.(csv|txt|tsv)$/i.test(file.name) && !/^text\//.test(file.type)) {
+      state.importResult = { error: `${file.name} isn’t a CSV or text file. Upload a .csv file with one character per row.` }; render(); return;
+    }
+    if (file.size > 1_000_000) { state.importResult = { error: 'That file is too big. Keep it to 500 characters.' }; render(); return; }
+    await importText(await file.text(), 'csv', file.name);
+  },
   async leave() {
     await emit('leave');
     state.view = null; state.roomId = null;
@@ -220,6 +263,15 @@ const forms = {
     if (state.peek?.visibility === 'public') await requestJoin(name);
     else await enterRoom(name);
   },
+  async addOne() {
+    const f = state.form;
+    const text = [f.charName, f.charImage].map((x) => x.trim()).filter(Boolean).map((x) => (x.includes(',') ? `"${x.replace(/"/g, '""')}"` : x)).join(',');
+    if (!f.charName.trim()) { state.importResult = { error: 'Type a character name.' }; render(); return; }
+    if (await importText(text, 'csv')) { f.charName = ''; f.charImage = ''; render(); document.querySelector('[data-field="charName"]')?.focus(); }
+  },
+  async addPaste() {
+    if (await importText(state.form.charPaste, 'paste')) { state.form.charPaste = ''; render(); }
+  },
   async report(form) {
     const r = await emit('report', { playerId: state.reportFor, reason: state.form.reportReason || '' });
     if (!r.ok) return toast(r.message);
@@ -242,6 +294,7 @@ $app.addEventListener('input', (e) => {
   const [key, idx] = el.dataset.field.split('.');
   if (idx !== undefined) state.form[key][Number(idx)] = el.value;
   else state.form[key] = el.value;
+  if (key === 'charSearch') render(); // filter as you type
 });
 $app.addEventListener('submit', (e) => {
   const form = e.target.closest('form[data-form]');
@@ -404,6 +457,108 @@ function playerRow(p, v) {
           <button class="btn btn-small" type="button" data-action="cancelReport">Cancel</button></div></form></li>` : ''}`;
 }
 
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+function importResultBox() {
+  const r = state.importResult;
+  if (!r) return '';
+  if (r.error) return html`<div class="result result-error" role="alert"><p>${r.error}</p></div>`;
+  const n = r.notes || {};
+  const extra = [
+    n.headerSkipped && 'The header row was skipped.',
+    n.blankRows && `${plural(n.blankRows, 'blank row')} ignored.`,
+    n.unsafeLinks && `${plural(n.unsafeLinks, 'link')} wasn’t a normal web link, so ${n.unsafeLinks === 1 ? 'it was' : 'they were'} dropped.`,
+    n.longNames && `${plural(n.longNames, 'name')} over 60 characters skipped.`,
+    n.linksWithoutName && `${plural(n.linksWithoutName, 'row')} had a link but no name, so ${n.linksWithoutName === 1 ? 'it was' : 'they were'} skipped.`,
+  ].filter(Boolean);
+  return html`
+    <div class="result" role="status">
+      <p><strong>Added ${plural(r.added, 'character')}</strong>${r.fileName ? html` from ${r.fileName}` : ''}. You now have ${r.total}.</p>
+      ${r.duplicates?.length ? html`
+        <p class="dup-head">${plural(r.duplicates.length, 'duplicate')} removed:</p>
+        <ul class="dups">${r.duplicates.map((d) => html`<li class="dup">${d}</li>`)}</ul>` : ''}
+      ${extra.map((t) => html`<p class="hint">${t}</p>`)}
+      <button class="btn btn-small" data-action="dismissResult">OK</button>
+    </div>`;
+}
+
+function poolStatus(v) {
+  const have = state.characters.list.length;
+  const players = Math.max(v.players.filter((p) => p.connected).length, 3);
+  const enough = have >= v.poolNeeded;
+  return html`
+    <p class="pool ${enough ? 'pool-ok' : 'pool-low'}">${enough
+      ? `Enough for ${players} players (needs ${v.poolNeeded}).`
+      : `Add ${v.poolNeeded - have} more: ${players} players need ${v.poolNeeded}.`}</p>
+    ${v.poolForCap > have && v.poolForCap !== v.poolNeeded ? html`<p class="hint">A full room of ${v.settings.cap} needs ${v.poolForCap}.</p>` : ''}`;
+}
+
+function characterList(v) {
+  const q = state.form.charSearch.trim().toLowerCase();
+  const all = state.characters.list;
+  if (!all.length) return html`<p class="hint empty">${v.isHost ? 'No characters yet. Add some above.' : 'The host hasn’t added any characters yet.'}</p>`;
+  const shown = q ? all.filter((c) => c.name.toLowerCase().includes(q)) : all;
+  const groups = new Map();
+  for (const c of shown) { const k = c.verse || ''; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(c); }
+  const multi = new Set(all.map((c) => c.verse || '')).size > 1 || all.some((c) => c.verse);
+  return html`
+    <label class="sr-only" for="char-search">Search characters</label>
+    <input type="text" id="char-search" data-field="charSearch" value="${state.form.charSearch}" placeholder="Search ${all.length} characters" autocomplete="off">
+    <div class="char-scroll" tabindex="0" aria-label="Character list">
+      ${shown.length ? [...groups].map(([verse, chars]) => html`
+        ${multi ? html`<div class="verse-head"><span>${verse || 'No anime given'} <small>${chars.length}</small></span>
+          ${v.isHost && !q ? (state.confirmClear === verse ? html`<span class="row-actions">
+              <button class="btn btn-small btn-danger" data-action="clearChars">Remove all ${chars.length}</button>
+              <button class="btn btn-small" data-action="cancelClear">Cancel</button></span>`
+            : html`<button class="btn btn-small" data-action="askClear" data-verse="${verse}">Remove list</button>`) : ''}</div>` : ''}
+        <ul class="char-list">${chars.map((c) => html`<li><span>${c.name}</span>${v.isHost ? html`<button class="x" data-action="removeChar" data-id="${c.id}" aria-label="Remove ${c.name}">×</button>` : ''}</li>`)}</ul>`)
+      : html`<p class="hint empty">No characters match “${state.form.charSearch}”.</p>`}
+    </div>
+    ${v.isHost && !multi ? (state.confirmClear === '*' ? html`<div class="row-actions clear-row">
+        <button class="btn btn-small btn-danger" data-action="clearChars">Remove all ${all.length}</button>
+        <button class="btn btn-small" data-action="cancelClear">Cancel</button></div>`
+      : html`<div class="clear-row"><button class="btn btn-small btn-ghost" data-action="askClear">Clear list</button></div>`) : ''}`;
+}
+
+function charactersPanel(v) {
+  const n = state.characters.list.length;
+  const tab = state.charTab;
+  const busy = raw(state.importing ? 'disabled' : '');
+  return html`
+    <section class="panel chars">
+      <div class="chars-head"><h3>Characters</h3><span class="count">${n}/500</span></div>
+      ${poolStatus(v)}
+      ${v.isHost ? html`
+        <div class="add-box">
+          <label class="field"><span class="label">Anime <small>— optional, groups this list</small></span>
+            <input type="text" data-field="charVerse" value="${state.form.charVerse}" maxlength="40" placeholder="e.g. One Piece"></label>
+          <div class="tabs" role="tablist" aria-label="How to add characters">
+            ${[['type', 'Type'], ['paste', 'Paste'], ['upload', 'Upload CSV']].map(([k, label]) => html`
+              <button class="tab" role="tab" aria-selected="${tab === k}" data-action="charTab" data-tab="${k}">${label}</button>`)}
+          </div>
+          ${tab === 'type' ? html`
+            <form data-form="addOne" class="tab-body" novalidate>
+              <input type="text" data-field="charName" value="${state.form.charName}" maxlength="60" placeholder="Character name" aria-label="Character name">
+              <input type="text" data-field="charImage" value="${state.form.charImage}" placeholder="Image link (optional)" aria-label="Image link, optional" inputmode="url">
+              <button class="btn btn-small btn-primary" type="submit" ${busy}>Add character</button>
+            </form>` : ''}
+          ${tab === 'paste' ? html`
+            <form data-form="addPaste" class="tab-body" novalidate>
+              <textarea data-field="charPaste" rows="5" aria-label="Paste characters" placeholder="${'One per line, or separated by commas:\nLuffy\nZoro, https://example.com/zoro.png\nNami, Usopp, Sanji'}">${state.form.charPaste}</textarea>
+              <button class="btn btn-small btn-primary" type="submit" ${busy}>Add characters</button>
+            </form>` : ''}
+          ${tab === 'upload' ? html`
+            <div class="tab-body">
+              <label class="btn btn-small btn-primary file-btn">Choose a CSV file
+                <input type="file" accept=".csv,.tsv,.txt,text/csv,text/plain" data-change="uploadFile" class="sr-only" ${busy}></label>
+              <p class="hint">One character per row. Put an image link in any column if you have one. Header rows are fine.</p>
+            </div>` : ''}
+          ${state.importing ? html`<p class="hint">Adding…</p>` : importResultBox()}
+        </div>` : ''}
+      ${characterList(v)}
+    </section>`;
+}
+
 function lobbyScreen(v) {
   const s = v.settings;
   const host = v.players.find((p) => p.isHost);
@@ -454,16 +609,13 @@ function lobbyScreen(v) {
         </section>
       </div>
 
-      <section class="panel">
-        <h3>Characters</h3>
-        <p class="hint">Loading the character list arrives in the next build phase.</p>
-      </section>
+      ${charactersPanel(v)}
     </div>
 
     <div class="start-zone">
       ${v.isHost ? html`
         <button class="btn btn-primary btn-block" data-action="start" ${raw(v.startBlockers.length ? 'disabled' : '')}>Start the draft</button>
-        ${v.startBlockers.length ? html`<p class="why">${v.startBlockers[0]}</p>` : ''}`
+        ${v.startBlockers.map((b) => html`<p class="why">${b}</p>`)}`
       : html`<p class="why">Waiting for ${host?.name} to start the draft.</p>`}
       <button class="btn btn-ghost btn-small" style="margin-top:18px" data-action="leave">Leave game</button>
     </div>`;
