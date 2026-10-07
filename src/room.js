@@ -414,6 +414,23 @@ export class Room {
     if (this.phase === 'faceoff' && this.faceoff.finished) this.phase = 'finished';
   }
 
+  // ---------- restart (R11.2) ----------
+  // Host only, once a champion is crowned. Same players (those still here), same roles, same original
+  // character list; the bin, teams and tokens are cleared, and a fresh draft starts straight away.
+  restart(byId, rng = Math.random, now = Date.now()) {
+    this.#requireHost(byId);
+    if (this.phase !== 'finished') throw new GameError('NOT_FINISHED', 'You can restart once the game has a champion.');
+    const here = this.connectedPlayers.length;
+    if (here < MIN_PLAYERS) throw new GameError('CANT_RESTART', `A rematch needs at least ${MIN_PLAYERS} players. ${here} ${here === 1 ? 'is' : 'are'} here.`);
+    for (const p of this.players.filter((x) => !x.connected)) this.#removePlayer(p.id, now);
+    this.phase = 'lobby';
+    this.draft = null; this.endPhase = null; this.faceoff = null;
+    this.kickVotes.clear();
+    this.turnOrder = [];
+    this.games = (this.games || 1) + 1;
+    this.start(byId, rng, now);
+  }
+
   // ---------- end phase (phase 4) ----------
   endAction(playerId, action, payload = {}, now = Date.now()) {
     if (this.phase !== 'endphase') throw new GameError('NOT_END_PHASE', 'The end phase isn’t running.');
@@ -499,6 +516,7 @@ export class Room {
       draft: this.draft ? this.draft.view(Date.now()) : null,
       end: this.endPhase ? this.endPhase.view() : null,
       faceoff: this.faceoff ? this.faceoff.view(playerId) : null,
+      game: this.games || 1,
       names: { ...(this.nameCache || {}), ...Object.fromEntries(this.players.map((p) => [p.id, p.name])) },
       kickVotes: this.phase === 'lobby' ? {} : Object.fromEntries(this.players.map((p) => [p.id, this.kickTally(p.id)]).filter(([, t]) => t.votes > 0)),
     };

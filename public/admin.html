@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Battle Draft admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    .reports { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+    .reports li { border-left: 4px solid var(--pink); padding: 4px 0 4px 12px; }
+    .reports .meta { color: var(--muted); font-size: 0.88rem; }
+    .reports .reason { margin-top: 4px; font-weight: 700; overflow-wrap: anywhere; }
+    .admin-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 20px; }
+  </style>
+</head>
+<body>
+  <main id="app">
+    <section id="loading" class="panel notice"><p>Loading…</p></section>
+
+    <section id="off" class="panel notice" hidden>
+      <h2>Admin isn’t set up</h2>
+      <p>Add ADMIN_USERNAME and ADMIN_PASSWORD to this service’s environment in Render, then reload.</p>
+    </section>
+
+    <form id="login" class="panel" hidden novalidate>
+      <h2 style="margin-bottom:16px">Admin sign-in</h2>
+      <label class="field"><span class="label">Username</span><input type="text" id="username" autocomplete="username" required></label>
+      <label class="field"><span class="label">Password</span><input type="password" id="password" autocomplete="current-password" required></label>
+      <p class="error-text" id="login-error" role="alert" hidden></p>
+      <button class="btn btn-primary btn-block" type="submit" style="margin-top:18px">Sign in</button>
+    </form>
+
+    <section id="dash" hidden>
+      <div class="admin-head"><h2>Reports</h2><button class="btn btn-small btn-ghost" id="logout">Sign out</button></div>
+      <div class="panel">
+        <p class="hint" id="count"></p>
+        <ul class="reports" id="reports"></ul>
+        <p class="hint" style="margin-top:16px">Reports are kept while the server is running. Every report is also written to the service’s logs in Render (search for “[report]”), so nothing is lost when the server restarts.</p>
+      </div>
+    </section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const show = (id) => { for (const s of ['loading', 'off', 'login', 'dash']) $(s).hidden = s !== id; };
+    const fmtTime = (ms) => new Date(ms).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+
+    async function loadReports() {
+      const res = await fetch('/admin/api/reports');
+      if (res.status === 401) return show('login');
+      const { reports } = await res.json();
+      $('count').textContent = reports.length ? `${reports.length} report${reports.length === 1 ? '' : 's'}, newest first.` : 'No reports yet.';
+      const list = $('reports');
+      list.replaceChildren(...reports.map((r) => {
+        const li = document.createElement('li');
+        const meta = document.createElement('p'); meta.className = 'meta';
+        meta.textContent = `${fmtTime(r.at)}. ${r.reporter} reported ${r.target} in “${r.roomName}”.`;
+        const reason = document.createElement('p'); reason.className = 'reason';
+        reason.textContent = r.reason; // plain text only
+        li.append(meta, reason);
+        return li;
+      }));
+      show('dash');
+    }
+
+    async function init() {
+      const me = await fetch('/admin/api/me').then((r) => r.json()).catch(() => ({}));
+      if (!me.setup) return show('off');
+      if (me.loggedIn) return loadReports();
+      show('login');
+      $('username').focus();
+    }
+
+    $('login').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('login-error').hidden = true;
+      const res = await fetch('/admin/api/login', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: $('username').value, password: $('password').value }),
+      });
+      if (res.ok) { $('password').value = ''; return loadReports(); }
+      const { message } = await res.json().catch(() => ({ message: 'Sign-in failed. Try again.' }));
+      $('login-error').textContent = message;
+      $('login-error').hidden = false;
+    });
+
+    $('logout').addEventListener('click', async () => { await fetch('/admin/api/logout', { method: 'POST' }); show('login'); });
+    init();
+  </script>
+</body>
+</html>

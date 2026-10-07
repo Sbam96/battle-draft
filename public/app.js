@@ -281,6 +281,7 @@ const actions = {
     const r = await emit('judge', { decision });
     if (!r.ok) toast(r.message);
   },
+  async restart() { const r = await emit('restart'); if (!r.ok) toast(r.message); },
   async nextMatch() { const r = await emit('nextMatch'); if (!r.ok) toast(r.message); },
   async voteKick(el) {
     const r = await emit('voteKick', { playerId: el.dataset.id });
@@ -1066,9 +1067,64 @@ function faceoffScreen(v) {
     </div>`;
 }
 
-// Placeholder until phase 6 builds the champion screen.
+// ---------- champion (phase 6) ----------
+const TROPHY = `<svg class="trophy" viewBox="0 0 120 130" role="img" aria-label="Trophy">
+  <path d="M30 14h60v26c0 22-13 38-30 38S30 62 30 40z" fill="#ffc93c" stroke="#1b1530" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M30 22H14c0 18 8 28 20 30M90 22h16c0 18-8 28-20 30" fill="none" stroke="#1b1530" stroke-width="5" stroke-linecap="round"/>
+  <path d="M52 78h16v16H52z" fill="#e0a800" stroke="#1b1530" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M34 94h52l6 16H28z" fill="#ff4f79" stroke="#1b1530" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M24 110h72v12H24z" fill="#1b1530"/>
+  <path d="m60 28 5 10 11 2-8 8 2 11-10-5-10 5 2-11-8-8 11-2z" fill="#fbf8ff" stroke="#1b1530" stroke-width="3" stroke-linejoin="round"/>
+</svg>`;
+
+function launchConfetti(key) {
+  if (state.confettiKey === key) return;
+  state.confettiKey = key;
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+  const colors = ['#ffc93c', '#ff4f79', '#2bb3a3', '#8f7cf7', '#fbf8ff', '#ff8a3d'];
+  const layer = document.createElement('div');
+  layer.className = 'confetti';
+  layer.setAttribute('aria-hidden', 'true');
+  for (let i = 0; i < 110; i += 1) {
+    const p = document.createElement('i');
+    p.style.left = `${Math.random() * 100}%`;
+    p.style.background = colors[i % colors.length];
+    p.style.animationDelay = `${Math.random() * 1.2}s`;
+    p.style.animationDuration = `${2.6 + Math.random() * 2}s`;
+    p.style.setProperty('--drift', `${(Math.random() - 0.5) * 160}px`);
+    p.style.setProperty('--spin', `${(Math.random() - 0.5) * 1440}deg`);
+    if (i % 3 === 0) p.style.borderRadius = '50%';
+    layer.appendChild(p);
+  }
+  document.body.appendChild(layer);
+  setTimeout(() => layer.remove(), 7000);
+}
+
 function finishedScreen(v) {
-  return html`<section class="panel notice"><h2>${pName(v, v.faceoff?.champion)} is the champion</h2></section>`;
+  const f = v.faceoff;
+  const champ = f?.champion;
+  const isMe = champ === v.you;
+  const host = v.players.find((p) => p.isHost);
+  const here = v.players.filter((p) => p.connected).length;
+  setTimeout(() => launchConfetti(`${v.id}:${v.game}`), 0);
+  return html`
+    <section class="champion">
+      ${raw(TROPHY)}
+      <p class="champ-label">Champion</p>
+      <h2 class="champ-name">${champ ? (isMe ? 'You win!' : pName(v, champ)) : 'No champion'}</h2>
+      <p class="champ-sub">${champ ? (isMe ? 'Your squad beat everyone. Enjoy the bragging rights.' : `${pName(v, champ)} wins ${v.settings.roomName}.`) : 'Everyone left before the final.'}</p>
+    </section>
+    <div class="stack">
+      ${champ && v.draft?.teams[champ] ? html`<section class="panel"><h3>The winning team</h3>${formation(v, champ, { compact: true })}</section>` : ''}
+      <section class="panel"><h3>Final bracket</h3>${bracket(v)}</section>
+    </div>
+    <div class="start-zone">
+      ${v.isHost ? html`
+        <button class="btn btn-primary btn-block" data-action="restart" ${raw(here < 3 ? 'disabled' : '')}>Play again</button>
+        <p class="why">${here < 3 ? `A rematch needs at least 3 players. ${here} ${here === 1 ? 'is' : 'are'} here.` : 'Same players, roles and characters. The bin is cleared and the wheel starts full.'}</p>`
+      : html`<p class="why">Waiting for ${host?.name} to start a rematch.</p>`}
+      <button class="btn btn-ghost btn-small" style="margin-top:18px" data-action="leave">Leave game</button>
+    </div>`;
 }
 
 // Keeps the persistent wheel in step with the server: segments, and the spin animation.

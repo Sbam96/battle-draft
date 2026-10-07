@@ -402,6 +402,24 @@ ol.role-list li { display: grid; grid-template-columns: 2.2rem 1fr; gap: 8px; al
 .b-match.bye { border-style: dashed; display: flex; align-items: center; justify-content: space-between; }
 .b-match.bye small { padding-right: 10px; color: var(--muted); }
 
+/* ---------- champion ---------- */
+.champion { text-align: center; padding: 20px 0 28px; }
+.trophy { width: 132px; height: auto; display: block; margin: 0 auto 10px; filter: drop-shadow(5px 5px 0 #000); }
+.champ-label { color: var(--gold); font-weight: 700; }
+.champ-name {
+  font-size: clamp(2.4rem, 11vw, 4rem); color: var(--paper); margin-top: 2px; overflow-wrap: anywhere;
+  -webkit-text-stroke: 2px var(--line); paint-order: stroke fill; text-shadow: 4px 4px 0 var(--pink);
+}
+.champ-sub { color: var(--on-dark-muted); margin-top: 10px; }
+.confetti { position: fixed; inset: 0; pointer-events: none; overflow: hidden; z-index: 20; }
+.confetti i {
+  position: absolute; top: -20px; width: 10px; height: 16px; border: 1.5px solid #1b1530;
+  animation-name: confetti-fall; animation-timing-function: cubic-bezier(.25,.6,.45,1); animation-fill-mode: forwards;
+}
+@keyframes confetti-fall {
+  to { transform: translate(var(--drift), 110vh) rotate(var(--spin)); }
+}
+
 .notice { text-align: center; }
 .notice p { margin: 10px 0 20px; }
 .waiting-dots { font-family: var(--display); font-size: 2rem; color: var(--gold); letter-spacing: 0.2em; }

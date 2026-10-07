@@ -6,12 +6,17 @@ import { Server } from 'socket.io';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { Room, GameError } from './room.js';
+import { mountAdmin } from './admin.js';
 import { roomId } from './ids.js';
 import { GRACE_MS, EMPTY_ROOM_TTL_MS, maxPlayersFor, PLACEMENT_TIMER_OPTIONS } from './config.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
-export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_MS } = {}) {
+export function createApp({
+  graceMs = GRACE_MS,
+  emptyRoomTtlMs = EMPTY_ROOM_TTL_MS,
+  admin = { username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD },
+} = {}) {
   const app = express();
   const http = createServer(app);
   const io = new Server(http, { cors: { origin: false }, maxHttpBufferSize: 2e6 });
@@ -23,6 +28,7 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
   const turnTimers = new Map(); // roomId -> timeout for the current turn's deadline or inactivity skip
 
   app.disable('x-powered-by');
+  app.set('trust proxy', 1); // Render sits in front: use the real client address and https flag
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -32,6 +38,8 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
   app.get('/config', (req, res) => res.json({ maxPlayers: { 5: maxPlayersFor(5), 10: maxPlayersFor(10) }, timerOptions: PLACEMENT_TIMER_OPTIONS }));
   app.get('/health', (req, res) => res.json({ ok: true, rooms: rooms.size }));
   app.get('/r/:id', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html')));
+  app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
+  mountAdmin(app, { credentials: admin, reports });
 
   // ---------- helpers ----------
   const publicList = () => [...rooms.values()]
@@ -202,7 +210,10 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
 
     on('report', ({ playerId, reason }) => {
       const room = currentRoom();
-      reports.push(room.report(socket.data.playerId, playerId, reason));
+      const report = room.report(socket.data.playerId, playerId, reason);
+      reports.push(report);
+      if (reports.length > 1000) reports.shift();
+      console.log(`[report] ${JSON.stringify(report)}`); // also kept in Render's logs, which survive restarts
     });
 
     on('leave', () => {
@@ -272,6 +283,12 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
       }
       broadcast(room);
       return { kicked: res.kicked };
+    });
+
+    on('restart', () => {
+      const room = currentRoom();
+      room.restart(socket.data.playerId);
+      broadcast(room);
     });
 
     on('start', () => {
