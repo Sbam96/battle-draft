@@ -52,6 +52,11 @@ const state = {
   animatingSpin: null,
   shownSpinId: null,
   keepChoice: 'new',
+  endMode: 'swap', // end phase: 'swap' | 'bin' | 'extra'
+  endFirst: null, // first role picked for a swap
+  binChoice: null, // character picked from the bin
+  ballots: {}, // matchId -> { role: 'a' | 'b' }
+  judgeDecision: {},
   img: new Map(), // charId -> 'loading' | 'ok' | 'fail'
   form: {
     name: store.get('bd-name') || '', roomName: '', visibility: 'private', roleCount: 5,
@@ -231,6 +236,52 @@ const actions = {
     const r = stage === 'compare' ? await emit('keep', { choice: state.keepChoice, role }) : await emit('place', { role });
     if (!r.ok) toast(r.message);
   },
+  endMode(el) { state.endMode = el.dataset.mode; state.endFirst = null; state.binChoice = null; render(); },
+  pickBinChar(el) { state.binChoice = el.dataset.id; render(); },
+  async endRole(el) {
+    const role = Number(el.dataset.role);
+    const go = state.view?.end?.go;
+    let r = { ok: true };
+    if (go?.stage === 'extra') r = await emit('keepExtra', { role });
+    else if (state.endMode === 'swap') {
+      if (state.endFirst === null) { state.endFirst = role; render(); return; }
+      if (state.endFirst === role) { state.endFirst = null; render(); return; }
+      r = await emit('swap', { roleA: state.endFirst, roleB: role });
+      state.endFirst = null;
+    } else if (state.endMode === 'bin') {
+      if (!state.binChoice) { toast('Pick a character from the bin first.'); return; }
+      r = await emit('binPick', { charId: state.binChoice, role });
+      state.binChoice = null;
+    }
+    if (!r.ok) toast(r.message);
+    render();
+  },
+  async extraSpin() { const r = await emit('extraSpin'); if (!r.ok) toast(r.message); },
+  async declineExtra() { const r = await emit('declineExtra'); if (!r.ok) toast(r.message); },
+  async endDone() { const r = await emit('endDone'); if (!r.ok) toast(r.message); },
+  pickVote(el) {
+    const m = state.view?.faceoff?.match;
+    if (!m) return;
+    state.ballots[m.id] = { ...(state.ballots[m.id] || {}), [el.dataset.role]: el.dataset.side };
+    render();
+  },
+  async submitVote() {
+    const m = state.view?.faceoff?.match;
+    const r = await emit('vote', { picks: state.ballots[m.id] || {} });
+    if (!r.ok) toast(r.message);
+  },
+  pickJudge(el) {
+    const m = state.view?.faceoff?.match;
+    state.judgeDecision[m.id] = { ...(state.judgeDecision[m.id] || {}), [el.dataset.role]: el.dataset.side };
+    render();
+  },
+  async submitJudge(el) {
+    const m = state.view?.faceoff?.match;
+    const decision = m.judge.kind === 'team' ? el.dataset.side : state.judgeDecision[m.id] || {};
+    const r = await emit('judge', { decision });
+    if (!r.ok) toast(r.message);
+  },
+  async nextMatch() { const r = await emit('nextMatch'); if (!r.ok) toast(r.message); },
   async voteKick(el) {
     const r = await emit('voteKick', { playerId: el.dataset.id });
     if (!r.ok) toast(r.message); else if (r.kicked) toast('Player removed by vote', true);
@@ -713,6 +764,11 @@ function logLine(v, e) {
     case 'timeout': return html`${p} ${e.reason === 'inactive' ? 'was skipped after disconnecting' : 'ran out of time'}.${e.returned ? html` ${charName(e.returned)} went back on the wheel.` : ''}`;
     case 'timeoutHeld': return html`${p} ran out of time. Their held ${charName(e.charId)} went in as ${role(e.role)}.`;
     case 'removed': return html`${p} left the game. Their characters went back on the wheel.`;
+    case 'swapped': return html`${p} swapped their ${role(e.roles[0])} and ${role(e.roles[1])}.`;
+    case 'binPick': return html`${p} picked ${charName(e.charId)} from the bin as ${role(e.role)}. ${charName(e.replaced)} went in the bin.`;
+    case 'extraKept': return html`${p} took an extra spin and kept ${charName(e.charId)} as ${role(e.role)}. ${charName(e.replaced)} went in the bin.`;
+    case 'extraDeclined': return html`${p} ${e.timedOut ? 'ran out of time on an extra spin' : 'let an extra spin go'}. ${charName(e.charId)} went in the bin.`;
+    case 'goTimeout': return html`${p}’s time ran out.`;
     default: return '';
   }
 }
@@ -764,11 +820,11 @@ function actionArea(v) {
     : html`<p class="prompt">${who} is choosing between them…</p>`}`;
 }
 
-function countdown(v) {
-  const t = v.draft.turn;
-  if (!t?.deadline) return '';
-  return html`<div class="countdown" data-deadline="${t.deadline}" data-total="${v.draft.timerMs}"><div class="bar"></div><span class="secs"></span></div>`;
+function countdownFor(deadline, total) {
+  if (!deadline) return '';
+  return html`<div class="countdown" data-deadline="${deadline}" data-total="${total}"><div class="bar"></div><span class="secs"></span></div>`;
 }
+function countdown(v) { return countdownFor(v.draft.turn?.deadline, v.draft.timerMs); }
 
 function tickCountdown() {
   const el = document.querySelector('.countdown');
@@ -847,14 +903,172 @@ function draftScreen(v) {
     </div>`;
 }
 
-function draftedScreen(v) {
+// ---------- end phase (phase 4) ----------
+function endPhaseScreen(v) {
   const d = v.draft;
+  const e = v.end;
+  const go = e.go;
+  const mine = go?.playerId === v.you;
+  const who = pName(v, go?.playerId);
+  const tokens = e.tokens[v.you] ?? 0;
+  const revealed = go?.spin && state.shownSpinId === go.spin.id;
+  const team = d.teams[go?.playerId] || [];
+  const mode = go?.stage === 'extra' ? 'extra' : state.endMode;
+  // Which roles are tappable for the active player right now.
+  const canTap = (i) => mine && team[i] != null && (go.stage === 'extra' ? revealed : mode === 'swap' || (mode === 'bin' && state.binChoice));
+  const tapLabel = go?.stage !== 'extra' && mode === 'swap' ? (state.endFirst === null ? 'Swap' : 'Swap with') : 'Replace';
+  const formationEnd = html`<ol class="formation">${v.settings.roles.map((role, i) => {
+    const id = team[i];
+    const picked = mine && mode === 'swap' && state.endFirst === i;
+    return html`<li class="${id == null ? 'empty' : ''} ${picked ? 'picked' : ''}">
+      <span class="pos" aria-hidden="true">${i + 1}</span><span class="slot-role">${role}</span>
+      ${canTap(i)
+        ? html`<button class="btn btn-small ${picked ? '' : 'btn-primary'} place-btn" data-action="endRole" data-role="${i}">${picked ? `${charName(id)} — tap to cancel` : html`${tapLabel} ${charName(id)}`}</button>`
+        : html`<span class="slot-char">${id == null ? 'Empty (can’t be filled)' : charName(id)}</span>`}
+    </li>`;
+  })}</ol>`;
+
+  let controls;
+  if (!go) controls = html`<p class="prompt">Getting the face-off ready…</p>`;
+  else if (!mine) controls = html`<p class="prompt">${who} is making final changes to their team.</p>`;
+  else if (go.stage === 'extra') {
+    controls = revealed
+      ? html`${charCard(go.landed, 'Extra spin')}
+          <p class="prompt">Tap a role below to replace it with ${charName(go.landed)}, or let it go.</p>
+          <button class="btn" data-action="declineExtra">Don’t keep ${charName(go.landed)}</button>`
+      : html`<p class="prompt">Spinning…</p>`;
+  } else {
+    const bin = d.bin;
+    controls = html`
+      <p class="prompt">You have ${tokens} ${tokens === 1 ? 'token' : 'tokens'} to spend.</p>
+      <div class="tabs end-tabs" role="tablist" aria-label="How to use a token">
+        ${[['swap', 'Swap two'], ['bin', 'Pick from bin'], ['extra', 'Extra spin']].map(([k, label]) => html`
+          <button class="tab" role="tab" aria-selected="${mode === k}" data-action="endMode" data-mode="${k}">${label}</button>`)}
+      </div>
+      ${mode === 'swap' ? html`<p class="hint center">${state.endFirst === null ? 'Tap the first role to swap.' : `Now tap the role to swap ${charName(team[state.endFirst])} with.`}</p>` : ''}
+      ${mode === 'bin' ? (bin.length ? html`
+        <p class="hint center">${state.binChoice ? `Now tap the role ${charName(state.binChoice)} should replace.` : 'Pick a character from the bin.'}</p>
+        <ul class="bin-list">${bin.map((id) => html`<li><button class="chip ${state.binChoice === id ? 'on' : ''}" data-action="pickBinChar" data-id="${id}" aria-pressed="${state.binChoice === id}">${charName(id)}</button></li>`)}</ul>`
+        : html`<p class="hint center">The bin is empty, so there’s nobody to pick.</p>`) : ''}
+      ${mode === 'extra' ? html`<p class="hint center">Spin once more. If you like who you land, they replace one of your characters.</p>
+        <button class="btn btn-primary spin-btn" data-action="extraSpin" ${raw(d.pool.length ? '' : 'disabled')}>Extra spin</button>` : ''}
+      <button class="btn btn-ghost btn-small" data-action="endDone">I’m done${tokens ? ` (lose ${tokens} unused)` : ''}</button>`;
+  }
+
   return html`
-    <header class="lobby-title"><h2>The draft is complete</h2><p>${v.settings.roomName}</p></header>
-    <div class="stack">
-      ${d.order.map((pid) => html`<section class="panel"><h3>${pName(v, pid)}${pid === v.you ? ' (you)' : ''}</h3>${formation(v, pid, { compact: true })}</section>`)}
-      <p class="why center">Swaps, bin picks and extra spins arrive in build phase 4.</p>
+    <header class="turn-banner">
+      <p class="round">Final changes</p>
+      <h2>${mine ? 'Your go' : `${who}’s go`}</h2>
+      ${tokens && !mine ? html`<p class="tokens"><span>Your tokens: ${tokens}</span></p>` : ''}
+      ${countdownFor(go?.deadline, e.goMs)}
+    </header>
+    <div class="draft-grid">
+      <section class="wheel-col">
+        <div id="wheel-slot"></div>
+        <div class="action-area">${controls}</div>
+      </section>
+      <section class="team-col">
+        <div class="panel"><h3>${mine ? 'Your team' : `${who}’s team`}</h3>${formationEnd}</div>
+        <div class="panel">
+          <h3>What’s happened</h3>
+          ${d.log.length ? html`<ul class="feed">${[...d.log].reverse().slice(0, 8).map((x) => html`<li>${logLine(v, x)}</li>`)}</ul>` : ''}
+        </div>
+        <details class="panel all-teams">
+          <summary><h3>All teams</h3></summary>
+          ${d.order.map((pid) => html`<div class="mini-team"><p class="mini-name">${pName(v, pid)} <small>${e.tokens[pid] ? `${e.tokens[pid]} token${e.tokens[pid] === 1 ? '' : 's'}` : ''}</small></p>${formation(v, pid, { compact: true })}</div>`)}
+        </details>
+      </section>
     </div>`;
+}
+
+// ---------- face-off (phase 5) ----------
+function bracket(v) {
+  const f = v.faceoff;
+  return html`<div class="bracket">${f.rounds.map((r) => html`
+    <div class="round-col">
+      <p class="round-name">${r.matches.length === 1 && !r.bye && r === f.rounds[f.rounds.length - 1] && (f.finished || f.alive.length <= 2) ? 'Final' : `Round ${r.number}`}</p>
+      ${r.matches.map((m) => html`<div class="b-match ${f.match?.id === m.id ? 'live' : ''}">
+        <span class="${m.winner === m.a ? 'won' : m.winner ? 'lost' : ''}">${pName(v, m.a)}</span>
+        <span class="${m.winner === m.b ? 'won' : m.winner ? 'lost' : ''}">${pName(v, m.b)}</span>
+      </div>`)}
+      ${r.bye ? html`<div class="b-match bye"><span>${pName(v, r.bye)}</span><small>Bye</small></div>` : ''}
+    </div>`)}</div>`;
+}
+
+function matchView(v) {
+  const f = v.faceoff;
+  const m = f.match;
+  if (!m) return '';
+  const A = pName(v, m.a); const B = pName(v, m.b);
+  const battling = v.you === m.a || v.you === m.b;
+  const canVote = m.stage === 'voting' && !battling && m.voters.includes(v.you) && !m.myBallot;
+  const myPicks = state.ballots[m.id] || {};
+  const judging = m.stage === 'judging' && m.judge.id === v.you;
+  const jd = state.judgeDecision[m.id] || {};
+  const roleName = (i) => v.settings.roles[i];
+  const cell = (p, side) => {
+    const id = side === 'a' ? p.a : p.b;
+    const name = id == null ? 'Empty' : charName(id);
+    if (canVote && p.auto === null) {
+      return html`<button class="vote-pick ${myPicks[p.role] === side ? 'on' : ''}" data-action="pickVote" data-role="${p.role}" data-side="${side}" aria-pressed="${myPicks[p.role] === side}">${name}</button>`;
+    }
+    if (judging && m.judge.kind === 'pairings' && m.judge.roles.includes(p.role)) {
+      return html`<button class="vote-pick ${jd[p.role] === side ? 'on' : ''}" data-action="pickJudge" data-role="${p.role}" data-side="${side}" aria-pressed="${jd[p.role] === side}">${name}</button>`;
+    }
+    const won = p.winner === side;
+    return html`<span class="pick-static ${id == null ? 'none' : ''} ${won ? 'won' : ''}">${name}${p.votes ? html` <small>${p.votes[side]}</small>` : ''}</span>`;
+  };
+  const allPicked = m.pairings.filter((p) => p.auto === null).every((p) => myPicks[p.role]);
+  const judgeComplete = m.judge?.kind === 'pairings' && m.judge.roles.every((r) => jd[r]);
+  let status;
+  if (m.stage === 'voting') {
+    status = canVote
+      ? html`<button class="btn btn-primary btn-block" data-action="submitVote" ${raw(allPicked ? '' : 'disabled')}>Submit votes</button>
+          ${allPicked ? '' : html`<p class="hint center">Pick a winner in every row.</p>`}`
+      : html`<p class="prompt">${battling ? 'You’re battling, so you sit this vote out.' : m.myBallot ? 'Votes in. Waiting for the others.' : 'Waiting for votes.'} ${m.voted.length}/${m.voters.length} voted.</p>`;
+  } else if (m.stage === 'judging') {
+    const judgeName = pName(v, m.judge.id);
+    if (!judging) status = html`<p class="prompt">It’s a tie. ${judgeName} is deciding.</p>`;
+    else if (m.judge.kind === 'pairings') status = html`<p class="prompt">You’re the judge. Pick the winner of each tied row.</p><button class="btn btn-primary btn-block" data-action="submitJudge" ${raw(judgeComplete ? '' : 'disabled')}>Decide</button>`;
+    else status = html`<p class="prompt">You’re the judge. The match is level. Who wins?</p>
+      <div class="bail"><button class="btn btn-primary" data-action="submitJudge" data-side="a">${A}</button><button class="btn btn-primary" data-action="submitJudge" data-side="b">${B}</button></div>`;
+  } else {
+    const w = pName(v, m.winner);
+    status = html`<p class="match-winner">${m.winner ? `${w} wins${m.score ? ` ${Math.max(m.score.a, m.score.b)}–${Math.min(m.score.a, m.score.b)}` : ''}` : 'No winner'}</p>
+      ${m.walkover ? html`<p class="hint center">Won by walkover: the other player left.</p>` : ''}
+      ${m.judged ? html`<p class="hint center">Decided by the judge after a tie.</p>` : ''}
+      ${m.standIn ? html`<p class="hint center">${pName(v, m.standIn.by)} stood in for ${m.standIn.count} missing ${m.standIn.count === 1 ? 'vote' : 'votes'}.</p>` : ''}
+      ${v.isHost ? html`<button class="btn btn-small" data-action="nextMatch">Next match now</button>` : ''}`;
+  }
+  return html`
+    <section class="panel match">
+      <div class="match-head"><span class="team-a">${A}</span><span class="vs">vs</span><span class="team-b">${B}</span></div>
+      ${countdownFor(m.deadline, m.stage === 'voting' ? f.voteMs : m.stage === 'judging' ? 60_000 : 12_000)}
+      <table class="pairings">
+        <thead><tr><th scope="col">Role</th><th scope="col">${A}</th><th scope="col">${B}</th></tr></thead>
+        <tbody>${m.pairings.map((p) => html`<tr>
+          <th scope="row">${roleName(p.role)}${p.auto && p.auto !== 'none' ? html`<small>Automatic</small>` : p.auto === 'none' ? html`<small>No point</small>` : p.judged ? html`<small>Judge’s call</small>` : ''}</th>
+          <td>${cell(p, 'a')}</td><td>${cell(p, 'b')}</td></tr>`)}</tbody>
+      </table>
+      <div class="match-status">${status}</div>
+    </section>`;
+}
+
+function faceoffScreen(v) {
+  const f = v.faceoff;
+  const out = v.draft.order.filter((pid) => !f.alive.includes(pid) && v.players.some((p) => p.id === pid));
+  return html`
+    <header class="turn-banner"><p class="round">Face-off</p><h2>${f.match ? `${pName(v, f.match.a)} vs ${pName(v, f.match.b)}` : 'Next match…'}</h2></header>
+    <div class="stack">
+      ${matchView(v)}
+      <section class="panel"><h3>Bracket</h3>${bracket(v)}</section>
+      ${out.length ? html`<p class="why center">Knocked out: ${out.map((id) => pName(v, id)).join(', ')}. Knocked-out players still vote on the other matches.</p>` : ''}
+    </div>`;
+}
+
+// Placeholder until phase 6 builds the champion screen.
+function finishedScreen(v) {
+  return html`<section class="panel notice"><h2>${pName(v, v.faceoff?.champion)} is the champion</h2></section>`;
 }
 
 // Keeps the persistent wheel in step with the server: segments, and the spin animation.
@@ -865,24 +1079,28 @@ function syncWheel(v) {
   const w = state.wheel;
   if (w.el.parentNode !== slot) slot.appendChild(w.el);
   const d = v.draft;
-  const t = d.turn;
   charById();
   const names = state.charNameMap;
-  const spun = t?.spin && (t.stage === 'landed' || t.stage === 'compare');
-  if (spun) {
-    w.setSegments(t.spin.wheel, names);
-    loadImage(t.spin.landed);
-    if (state.shownSpinId !== t.spin.id && state.animatingSpin !== t.spin.id) {
-      state.animatingSpin = t.spin.id;
-      const elapsed = serverNow() - t.spin.at;
-      w.spinTo(t.spin.landed, {
-        duration: d.spinMs, elapsed, seed: t.spin.id,
-        onDone: () => { state.shownSpinId = t.spin.id; state.animatingSpin = null; render(); },
+  let spin = null;
+  let held = null;
+  if (v.phase === 'draft') {
+    const t = d.turn;
+    if (t?.spin && (t.stage === 'landed' || t.stage === 'compare')) spin = t.spin;
+    held = t?.held ?? null;
+  } else if (v.phase === 'endphase' && v.end?.go?.stage === 'extra') spin = v.end.go.spin;
+  if (spin) {
+    w.setSegments(spin.wheel, names);
+    loadImage(spin.landed);
+    if (state.shownSpinId !== spin.id && state.animatingSpin !== spin.id) {
+      state.animatingSpin = spin.id;
+      w.spinTo(spin.landed, {
+        duration: d.spinMs, elapsed: serverNow() - spin.at, seed: spin.id,
+        onDone: () => { state.shownSpinId = spin.id; state.animatingSpin = null; render(); },
       });
-    } else if (!w.spinning) w.showName(charName(t.spin.landed));
+    } else if (!w.spinning) w.showName(charName(spin.landed));
   } else {
     w.setSegments(d.pool, names);
-    if (!w.spinning) w.showName(t?.held != null ? `Holding ${charName(t.held)}` : '');
+    if (!w.spinning) w.showName(held != null ? `Holding ${charName(held)}` : '');
   }
 }
 
@@ -903,7 +1121,9 @@ function render() {
       if (!v) body = html`<p>Loading…</p>`;
       else if (v.phase === 'lobby') body = lobbyScreen(v);
       else if (v.phase === 'draft') body = draftScreen(v);
-      else body = draftedScreen(v);
+      else if (v.phase === 'endphase') body = endPhaseScreen(v);
+      else if (v.phase === 'faceoff') body = faceoffScreen(v);
+      else body = finishedScreen(v);
       break;
     }
     default: body = homeScreen();
@@ -912,9 +1132,11 @@ function render() {
   const active = document.activeElement;
   const key = active?.dataset?.field || active?.id;
   const sel = active && 'selectionStart' in active ? [active.selectionStart, active.selectionEnd] : null;
-  $app.classList.toggle('wide', state.screen === 'room' && state.view?.phase === 'draft');
+  const wheelPhase = state.screen === 'room' && ['draft', 'endphase'].includes(state.view?.phase);
+  $app.classList.toggle('wide', wheelPhase);
   $app.innerHTML = fmt(html`${state.screen === 'room' ? offlineBar() : ''}${body}`);
-  if (state.screen === 'room' && state.view?.phase === 'draft') { syncWheel(state.view); tickCountdown(); }
+  if (wheelPhase) syncWheel(state.view);
+  tickCountdown();
   if (key) {
     const el = $app.querySelector(`[data-field="${CSS.escape(key)}"]`) || document.getElementById(key);
     if (el && el.type !== 'radio') { el.focus({ preventScroll: true }); if (sel && 'setSelectionRange' in el) try { el.setSelectionRange(...sel); } catch { /* number inputs */ } }

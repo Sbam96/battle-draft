@@ -298,7 +298,7 @@ test('R8.6 the whole draft completes and moves to the next phase', () => {
     r.draftAction(pid, 'spin', {}, T0);
     r.draftAction(pid, 'place', { role: r.draft.teams.get(pid).indexOf(null) }, T0);
   }
-  assert.equal(r.phase, 'drafted');
+  assert.equal(r.phase, 'endphase', 'leftover respins open the end phase');
   assert.equal(code(() => r.draftAction(r.hostId, 'spin', {}, T0)), 'NOT_DRAFTING');
 });
 test('NF5 draft actions from the wrong player are refused at the room level', () => {

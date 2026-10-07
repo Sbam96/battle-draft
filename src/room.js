@@ -7,6 +7,8 @@ import {
 } from './config.js';
 import { parseText, mergeCharacters } from './characters.js';
 import { Draft, DraftError } from './draft.js';
+import { EndPhase } from './endphase.js';
+import { Faceoff } from './faceoff.js';
 import { isProfane } from './profanity.js';
 import { shortId } from './ids.js';
 
@@ -80,6 +82,8 @@ export class Room {
     this.characters = []; // [{ id, name, image, verse }] — the original list, kept for restarts
     this.charVersion = 0;
     this.draft = null;
+    this.endPhase = null;
+    this.faceoff = null;
     this.kickVotes = new Map(); // targetId -> Set of voter ids (R8.8)
     this.random = undefined; // tests can inject a deterministic wheel
     const host = this.#addPlayer(hostToken, validateName(hostName), now);
@@ -271,9 +275,15 @@ export class Room {
     this.turnOrder = this.turnOrder.filter((t) => t !== id);
     this.kickVotes.delete(id);
     for (const votes of this.kickVotes.values()) votes.delete(id);
-    if (this.draft && !this.draft.finished) {
+    if (this.phase === 'draft' && this.draft && !this.draft.finished) {
       this.draft.removePlayer(id, now);
-      this.#afterDraftChange();
+      this.#afterDraftChange(now);
+    } else if (this.phase === 'endphase') {
+      this.endPhase.removePlayer(id, now);
+      this.#afterDraftChange(now);
+    } else if (this.phase === 'faceoff') {
+      this.faceoff.removePlayer(id, now);
+      this.#afterDraftChange(now);
     }
     this.#touch();
   }
@@ -379,16 +389,77 @@ export class Room {
       if (err instanceof DraftError) throw new GameError(err.code, err.message);
       throw err;
     }
-    this.#afterDraftChange();
+    this.#afterDraftChange(now);
     this.#touch();
   }
 
-  #afterDraftChange() {
-    if (this.draft?.finished && this.phase === 'draft') this.phase = 'drafted'; // phase 4 picks up from here
+  // Moves the game on: draft -> end phase -> face-off -> finished.
+  #afterDraftChange(now = Date.now()) {
+    if (this.phase === 'draft' && this.draft?.finished) {
+      this.phase = 'endphase';
+      this.endPhase = new EndPhase(this.draft, this.random ? { random: this.random } : {});
+      this.endPhase.begin(now);
+    }
+    if (this.phase === 'endphase' && this.endPhase.finished) {
+      this.phase = 'faceoff';
+      this.faceoff = new Faceoff({
+        order: this.draft.order.filter((id) => this.player(id)),
+        teams: this.draft.teams,
+        roleCount: this.settings.roleCount,
+        ctx: { players: () => this.players.map((p) => ({ id: p.id, connected: p.connected })), hostId: () => this.hostId },
+        ...(this.random ? { random: this.random } : {}),
+      });
+      this.faceoff.begin(now);
+    }
+    if (this.phase === 'faceoff' && this.faceoff.finished) this.phase = 'finished';
+  }
+
+  // ---------- end phase (phase 4) ----------
+  endAction(playerId, action, payload = {}, now = Date.now()) {
+    if (this.phase !== 'endphase') throw new GameError('NOT_END_PHASE', 'The end phase isn’t running.');
+    const e = this.endPhase;
+    this.#wrap(() => {
+      switch (action) {
+        case 'swap': e.swap(playerId, payload.roleA, payload.roleB, now); break;
+        case 'binPick': e.pickFromBin(playerId, payload.charId, payload.role, now); break;
+        case 'extraSpin': e.extraSpin(playerId, now); break;
+        case 'keepExtra': e.keepExtra(playerId, payload.role, now); break;
+        case 'declineExtra': e.declineExtra(playerId, now); break;
+        case 'endDone': e.done(playerId, now); break;
+        default: throw new GameError('BAD_ACTION', 'Unknown action.');
+      }
+    });
+    this.#afterDraftChange(now);
+    this.#touch();
+  }
+
+  // ---------- face-off (phase 5) ----------
+  faceoffAction(playerId, action, payload = {}, now = Date.now()) {
+    if (this.phase !== 'faceoff') throw new GameError('NOT_FACEOFF', 'The face-off isn’t running.');
+    const f = this.faceoff;
+    this.#wrap(() => {
+      switch (action) {
+        case 'vote': f.vote(playerId, payload.picks, now); break;
+        case 'judge': f.judge(playerId, payload.decision, now); break;
+        case 'nextMatch': this.#requireHost(playerId); f.next(now); break;
+        default: throw new GameError('BAD_ACTION', 'Unknown action.');
+      }
+    });
+    this.#afterDraftChange(now);
+    this.#touch();
+  }
+
+  #wrap(fn) {
+    try { fn(); } catch (err) {
+      if (err instanceof DraftError) throw new GameError(err.code, err.message);
+      throw err;
+    }
   }
 
   // When the server should next check the current turn (timer or inactive player), or null.
   turnDueAt() {
+    if (this.phase === 'endphase') return this.endPhase.dueAt();
+    if (this.phase === 'faceoff') return this.faceoff.dueAt();
     if (this.phase !== 'draft' || !this.draft?.turn) return null;
     const active = this.player(this.draft.turn.playerId);
     return this.draft.dueAt({ activeConnected: active?.connected ?? false, activeDisconnectedAt: active?.disconnectedAt ?? null });
@@ -398,9 +469,10 @@ export class Room {
   tick(now = Date.now()) {
     const due = this.turnDueAt();
     if (due == null || now < due) return false;
-    const reason = this.draft.turn.deadline ? 'timer' : 'inactive';
-    this.draft.timeout(now, reason);
-    this.#afterDraftChange();
+    if (this.phase === 'endphase') this.endPhase.timeout(now);
+    else if (this.phase === 'faceoff') this.faceoff.timeout(now);
+    else this.draft.timeout(now, this.draft.turn.deadline ? 'timer' : 'inactive');
+    this.#afterDraftChange(now);
     this.#touch();
     return true;
   }
@@ -425,6 +497,8 @@ export class Room {
       poolNeeded: minimumPool(Math.max(this.connectedPlayers.length, MIN_PLAYERS), this.settings.roleCount),
       poolForCap: minimumPool(this.settings.cap, this.settings.roleCount),
       draft: this.draft ? this.draft.view(Date.now()) : null,
+      end: this.endPhase ? this.endPhase.view() : null,
+      faceoff: this.faceoff ? this.faceoff.view(playerId) : null,
       names: { ...(this.nameCache || {}), ...Object.fromEntries(this.players.map((p) => [p.id, p.name])) },
       kickVotes: this.phase === 'lobby' ? {} : Object.fromEntries(this.players.map((p) => [p.id, this.kickTally(p.id)]).filter(([, t]) => t.votes > 0)),
     };

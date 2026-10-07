@@ -221,7 +221,7 @@ test('R1.4 / NF1 a full draft over the wire: every screen agrees at the end', as
     assert.ok((await call(active, 'place', { role })).ok);
     await waitFor(() => host.last.version >= active.last.version);
   }
-  await waitFor(() => [host, p2, p3].every((c) => c.last.phase === 'drafted'));
+  await waitFor(() => [host, p2, p3].every((c) => c.last.phase === 'endphase'));
   assert.deepEqual(p2.last.draft.teams, host.last.draft.teams);
   assert.deepEqual(p3.last.draft.teams, host.last.draft.teams);
   const all = Object.values(host.last.draft.teams).flat();

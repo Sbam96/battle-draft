@@ -246,6 +246,22 @@ export function createApp({ graceMs = GRACE_MS, emptyRoomTtlMs = EMPTY_ROOM_TTL_
       });
     }
 
+    for (const action of ['swap', 'binPick', 'extraSpin', 'keepExtra', 'declineExtra', 'endDone']) {
+      on(action, (payload) => {
+        const room = currentRoom();
+        room.endAction(socket.data.playerId, action, payload);
+        broadcast(room);
+      });
+    }
+
+    for (const action of ['vote', 'judge', 'nextMatch']) {
+      on(action, (payload) => {
+        const room = currentRoom();
+        room.faceoffAction(socket.data.playerId, action, payload);
+        broadcast(room);
+      });
+    }
+
     on('voteKick', ({ playerId }) => {
       const room = currentRoom();
       const res = room.voteKick(socket.data.playerId, playerId);
