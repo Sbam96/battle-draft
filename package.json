@@ -1,0 +1,26 @@
+{
+  "name": "battle-draft",
+  "version": "0.1.0",
+  "description": "Battle Draft: multiplayer anime draft party game",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^5.2.1",
+    "obscenity": "^0.4.6",
+    "socket.io": "^4.8.4"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "private": true
+}
