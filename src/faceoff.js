@@ -81,8 +81,9 @@ export class Faceoff {
       const auto = ca != null && cb != null ? null : ca != null ? 'a' : cb != null ? 'b' : 'none';
       return { role: i, a: ca, b: cb, auto, winner: auto === 'none' ? null : auto, votes: null };
     });
-    this.match = { id: meta.id, a, b, stage: 'voting', pairings, ballots: new Map(), deadline: now + this.voteMs, judge: null, startedAt: now };
+    this.match = { id: meta.id, a, b, stage: 'voting', pairings, ballots: new Map(), deadline: now + this.voteMs, judge: null, startedAt: now, paused: null };
     if (!pairings.some((p) => p.auto === null)) this.#resolveVotes(now);
+    else this.refresh(now);
   }
 
   eligibleVoters() {
@@ -141,35 +142,77 @@ export class Faceoff {
     else this.#finish(a > b ? m.a : m.b, now);
   }
 
+  // Players who aren't in the current match (connected or not).
+  #neutrals({ connectedOnly = false } = {}) {
+    const m = this.match;
+    return this.ctx.players().filter((p) => p.id !== m.a && p.id !== m.b && (!connectedOnly || p.connected)).map((p) => p.id);
+  }
+
+  // A match can only be voted on or judged by someone who isn't in it. If every such player is
+  // disconnected, the match pauses (keeping its remaining time) until one of them is back.
+  // Called whenever someone disconnects, reconnects or leaves.
+  refresh(now) {
+    const m = this.match;
+    if (!m || (m.stage !== 'voting' && m.stage !== 'judging')) return false;
+    const online = this.#neutrals({ connectedOnly: true });
+    if (!this.#neutrals().length) { this.#noJudgePossible(now); return true; }
+    if (!online.length && !m.paused) {
+      m.paused = { since: now, remaining: Math.max(15_000, (m.deadline ?? now) - now) };
+      m.deadline = null;
+      return true;
+    }
+    if (online.length && m.paused) {
+      const { remaining } = m.paused;
+      m.paused = null;
+      m.deadline = now + remaining;
+      if (m.stage === 'judging' && !online.includes(m.judge?.id)) this.#askJudge(m.judge.kind, m.judge.roles, now, { fresh: true });
+      return true;
+    }
+    if (m.stage === 'judging' && m.judge?.id && !online.includes(m.judge.id)) {
+      this.#askJudge(m.judge.kind, m.judge.roles, now); // judge dropped: ask the next one straight away
+      return true;
+    }
+    return false;
+  }
+
   // R10: who breaks ties.
   #judgeCandidates() {
     const m = this.match;
     const host = this.ctx.hostId();
-    const neutrals = this.ctx.players().filter((p) => p.connected && p.id !== m.a && p.id !== m.b).map((p) => p.id);
+    const neutrals = this.#neutrals({ connectedOnly: true });
     const hostNeutral = neutrals.includes(host);
     const others = this.#shuffle(neutrals.filter((id) => id !== host));
     return hostNeutral ? [host, ...others] : others;
   }
 
-  #askJudge(kind, roles, now) {
+  #askJudge(kind, roles, now, { fresh = false } = {}) {
     const m = this.match;
-    const tried = m.judge?.tried || [];
-    const next = this.#judgeCandidates().find((id) => !tried.includes(id));
-    if (!next) { this.#fallback(kind, roles, now); return; }
     m.stage = 'judging';
-    m.judge = { id: next, kind, roles, tried: [...tried, next] };
-    m.deadline = now + JUDGE_MS;
+    if (!this.#neutrals().length) { m.judge = { id: null, kind, roles, tried: [] }; this.#noJudgePossible(now); return; }
+    let tried = fresh ? [] : m.judge?.tried || [];
+    const candidates = this.#judgeCandidates();
+    let next = candidates.find((id) => !tried.includes(id));
+    if (!next && candidates.length) { tried = []; [next] = candidates; } // everyone online has had a turn: start again
+    m.judge = { id: next ?? null, kind, roles, tried: next ? [...tried, next] : tried };
+    if (next) { m.paused = null; m.deadline = now + JUDGE_MS; return; }
+    // Nobody who can judge is online: wait for them.
+    m.paused = { since: now, remaining: JUDGE_MS };
+    m.deadline = null;
   }
 
-  // Only if nobody is available to judge: tied pairings score for nobody; a level match goes to the
-  // team with more filled roles, then the higher seed.
-  #fallback(kind, roles, now) {
+  // Only when nobody outside the match is left in the game at all (they were removed), so no one can
+  // ever vote or judge it. Tied pairings score for nobody; a level match goes to the team with more
+  // filled roles, then a coin toss. Never decided by who joined first.
+  #noJudgePossible(now) {
     const m = this.match;
     this.log.push({ kind: 'noJudge', matchId: m.id, at: now });
-    if (kind === 'pairings') { for (const r of roles) m.pairings[r].winner = null; this.#score(now); return; }
+    const a = m.pairings.filter((p) => p.winner === 'a').length;
+    const b = m.pairings.filter((p) => p.winner === 'b').length;
+    m.score = { a, b };
+    if (a !== b) { this.#finish(a > b ? m.a : m.b, now, { noJudge: true }); return; }
     const filled = (p) => this.teams.get(p).filter((x) => x != null).length;
-    const winner = filled(m.a) !== filled(m.b) ? (filled(m.a) > filled(m.b) ? m.a : m.b) : (this.seedOrder.indexOf(m.a) < this.seedOrder.indexOf(m.b) ? m.a : m.b);
-    this.#finish(winner, now, { fallback: true });
+    if (filled(m.a) !== filled(m.b)) { this.#finish(filled(m.a) > filled(m.b) ? m.a : m.b, now, { noJudge: true }); return; }
+    this.#finish(this.random(2) === 0 ? m.a : m.b, now, { noJudge: true, coinToss: true });
   }
 
   judge(pid, decision, now) {
@@ -216,11 +259,11 @@ export class Faceoff {
     this.log.push({ kind: 'champion', playerId: pid, at: now });
   }
 
-  dueAt() { return this.match?.deadline ?? null; }
+  dueAt() { return this.match?.paused ? null : this.match?.deadline ?? null; }
 
   timeout(now) {
     const m = this.match;
-    if (!m) return false;
+    if (!m || m.paused) return false;
     if (m.stage === 'voting') this.#resolveVotes(now);
     else if (m.stage === 'judging') this.#askJudge(m.judge.kind, m.judge.roles, now);
     else if (m.stage === 'result') this.next(now);
@@ -233,8 +276,13 @@ export class Faceoff {
     const m = this.match;
     this.alive.delete(pid);
     if (m && m.stage !== 'result' && (m.a === pid || m.b === pid)) { this.#finish(m.a === pid ? m.b : m.a, now, { walkover: true }); return; }
-    if (m?.stage === 'voting') { m.ballots.delete(pid); if (this.eligibleVoters().every((v) => m.ballots.has(v))) this.#resolveVotes(now); }
-    if (m?.stage === 'judging' && m.judge.id === pid) this.#askJudge(m.judge.kind, m.judge.roles, now);
+    if (m?.stage === 'voting') {
+      m.ballots.delete(pid);
+      if (!this.#neutrals().length) { this.#noJudgePossible(now); return; }
+      if (this.eligibleVoters().every((v) => m.ballots.has(v))) { this.#resolveVotes(now); return; }
+    }
+    if (m?.stage === 'judging' && m.judge.id === pid) { this.#askJudge(m.judge.kind, m.judge.roles, now); return; }
+    this.refresh(now);
   }
 
   view(forPlayer) {
@@ -248,8 +296,10 @@ export class Faceoff {
       finished: this.finished,
       voteMs: this.voteMs,
       match: m && {
-        id: m.id, a: m.a, b: m.b, stage: m.stage, deadline: m.deadline, winner: m.winner ?? null,
-        score: m.score ?? null, walkover: Boolean(m.walkover), judged: Boolean(m.judged), fallback: Boolean(m.fallback),
+        id: m.id, a: m.a, b: m.b, stage: m.stage, deadline: m.paused ? null : m.deadline, winner: m.winner ?? null,
+        paused: Boolean(m.paused), waitingFor: m.paused ? this.#neutrals() : [],
+        noJudge: Boolean(m.noJudge), coinToss: Boolean(m.coinToss),
+        score: m.score ?? null, walkover: Boolean(m.walkover), judged: Boolean(m.judged),
         pairings: m.pairings.map((p) => ({ role: p.role, a: p.a, b: p.b, auto: p.auto, winner: showVotes ? p.winner : null, votes: showVotes ? p.votes : null, judged: Boolean(p.judged) })),
         voted: [...(m.ballots?.keys() || [])].filter((id) => !m.ballots.get(id).standIn),
         voters: this.eligibleVoters(),

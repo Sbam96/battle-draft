@@ -101,7 +101,7 @@ function go(screen, extra = {}) {
 }
 
 function notice(title, message) {
-  state.view = null; state.roomId = null;
+  state.view = null; state.roomId = null; state.characters = { version: -1, list: [] };
   setPath('/');
   go('notice', { notice: { title, message } });
 }
@@ -147,7 +147,7 @@ socket.on('room', (view) => {
   render();
 });
 socket.on('characters', (payload) => {
-  state.characters = payload;
+  state.characters = { ...payload }; // a new object each time, so the name lookup always rebuilds
   if (state.screen === 'room') render();
 });
 socket.on('publicRooms', (rooms) => { state.rooms = rooms; if (state.screen === 'browse') render(); });
@@ -313,7 +313,7 @@ const actions = {
   },
   async leave() {
     await emit('leave');
-    state.view = null; state.roomId = null;
+    state.view = null; state.roomId = null; state.characters = { version: -1, list: [] };
     setPath('/'); go('home');
   },
 };
@@ -699,15 +699,28 @@ function lobbyScreen(v) {
 
 // ---------- draft screen ----------
 const serverNow = () => Date.now() + state.clockOffset;
+// The name lookup is rebuilt whenever a new list arrives. It is tied to the list itself (not its
+// version number), because every room numbers its versions from 1.
 const charById = () => {
-  if (state.charMapVersion !== state.characters.version) {
+  if (state.charMapSource !== state.characters) {
     state.charMap = new Map(state.characters.list.map((c) => [c.id, c]));
     state.charNameMap = new Map(state.characters.list.map((c) => [c.id, c.name]));
-    state.charMapVersion = state.characters.version;
+    state.charMapSource = state.characters;
   }
   return state.charMap;
 };
-const charName = (id) => charById().get(id)?.name ?? 'Unknown';
+// If a screen meets a character it doesn't know, fetch the list again (at most every 3 seconds).
+function missingCharacter() {
+  const now = Date.now();
+  if (now - (state.lastCharRefetch || 0) < 3000) return;
+  state.lastCharRefetch = now;
+  emit('getCharacters').then((r) => { if (r.ok && r.list) { state.characters = { version: r.version, list: r.list }; render(); } });
+}
+const charName = (id) => {
+  const c = charById().get(id);
+  if (!c && id != null) missingCharacter();
+  return c?.name ?? 'Loading…';
+};
 const pName = (v, id) => v.names?.[id] ?? 'A player';
 
 // R7.4: load an image in the background; give up after 4 seconds and show the name instead.
@@ -1022,7 +1035,11 @@ function matchView(v) {
   const allPicked = m.pairings.filter((p) => p.auto === null).every((p) => myPicks[p.role]);
   const judgeComplete = m.judge?.kind === 'pairings' && m.judge.roles.every((r) => jd[r]);
   let status;
-  if (m.stage === 'voting') {
+  if (m.paused) {
+    const who = m.waitingFor.map((id) => pName(v, id)).join(' or ');
+    status = html`<p class="prompt">Paused: waiting for ${who} to reconnect.</p>
+      <p class="hint center">Only ${who} can ${m.stage === 'judging' ? 'judge' : 'vote on'} this match, so it carries on when they’re back. If they’ve gone for good, vote to remove them below.</p>`;
+  } else if (m.stage === 'voting') {
     status = canVote
       ? html`<button class="btn btn-primary btn-block" data-action="submitVote" ${raw(allPicked ? '' : 'disabled')}>Submit votes</button>
           ${allPicked ? '' : html`<p class="hint center">Pick a winner in every row.</p>`}`
@@ -1038,6 +1055,7 @@ function matchView(v) {
     status = html`<p class="match-winner">${m.winner ? `${w} wins${m.score ? ` ${Math.max(m.score.a, m.score.b)}–${Math.min(m.score.a, m.score.b)}` : ''}` : 'No winner'}</p>
       ${m.walkover ? html`<p class="hint center">Won by walkover: the other player left.</p>` : ''}
       ${m.judged ? html`<p class="hint center">Decided by the judge after a tie.</p>` : ''}
+      ${m.noJudge ? html`<p class="hint center">Nobody outside this match was left to vote, so it was decided ${m.coinToss ? 'by a coin toss' : 'by the votes counted and filled roles'}.</p>` : ''}
       ${m.standIn ? html`<p class="hint center">${pName(v, m.standIn.by)} stood in for ${m.standIn.count} missing ${m.standIn.count === 1 ? 'vote' : 'votes'}.</p>` : ''}
       ${v.isHost ? html`<button class="btn btn-small" data-action="nextMatch">Next match now</button>` : ''}`;
   }
@@ -1055,6 +1073,17 @@ function matchView(v) {
     </section>`;
 }
 
+function faceoffPlayers(v) {
+  const away = v.players.filter((p) => !p.connected);
+  if (!away.length) return '';
+  return html`<section class="panel"><h3>Disconnected</h3><ul class="list">${away.map((p) => {
+    const votes = v.kickVotes?.[p.id];
+    const iVoted = votes?.voters?.includes(v.you);
+    return html`<li class="away"><span class="grow">${p.name}</span>
+      <button class="btn btn-small" data-action="voteKick" data-id="${p.id}" ${raw(iVoted ? 'disabled' : '')}>${iVoted ? 'Voted' : 'Vote to remove'}${votes ? ` ${votes.votes}/${votes.needed}` : ''}</button></li>`;
+  })}</ul></section>`;
+}
+
 function faceoffScreen(v) {
   const f = v.faceoff;
   const out = v.draft.order.filter((pid) => !f.alive.includes(pid) && v.players.some((p) => p.id === pid));
@@ -1063,6 +1092,7 @@ function faceoffScreen(v) {
     <div class="stack">
       ${matchView(v)}
       <section class="panel"><h3>Bracket</h3>${bracket(v)}</section>
+      ${faceoffPlayers(v)}
       ${out.length ? html`<p class="why center">Knocked out: ${out.map((id) => pName(v, id)).join(', ')}. Knocked-out players still vote on the other matches.</p>` : ''}
     </div>`;
 }
@@ -1136,7 +1166,7 @@ function syncWheel(v) {
   if (w.el.parentNode !== slot) slot.appendChild(w.el);
   const d = v.draft;
   charById();
-  const names = state.charNameMap;
+  const names = state.charNameMap; // rebuilt per list, so the wheel redraws its labels when it changes
   let spin = null;
   let held = null;
   if (v.phase === 'draft') {

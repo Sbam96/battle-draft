@@ -227,6 +227,8 @@ export function createApp({
       scheduleEmptyCheck(room);
     });
 
+    on('getCharacters', () => currentRoom().charactersPayload());
+
     on('addCharacters', ({ text, source, verse }) => {
       const room = currentRoom();
       const result = room.addCharacters(socket.data.playerId, { text: String(text ?? ''), source, verse });

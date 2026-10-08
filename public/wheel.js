@@ -52,6 +52,7 @@ export class Wheel {
 
   // ids: segment order; names: Map id -> name
   setSegments(ids, names) {
+    if (names !== this.names) this.key = ''; // new name list: redraw the labels
     const key = `${ids.length}:${ids[0]}:${ids[ids.length - 1]}:${ids.join('').length}`;
     this.names = names;
     this.hubCount.textContent = String(ids.length);

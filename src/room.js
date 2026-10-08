@@ -129,6 +129,7 @@ export class Room {
     if (existing) {
       existing.connected = true;
       existing.disconnectedAt = null;
+      this.#syncFaceoff(now);
       this.#touch();
       return { player: existing, reconnected: true };
     }
@@ -246,8 +247,16 @@ export class Room {
     if (!p || !p.connected) return false;
     p.connected = false;
     p.disconnectedAt = now;
+    this.#syncFaceoff(now);
     this.#touch();
     return true;
+  }
+
+  // The face-off pauses while nobody who can vote or judge the current match is connected.
+  #syncFaceoff(now = Date.now()) {
+    if (this.phase !== 'faceoff' || !this.faceoff) return;
+    this.faceoff.refresh(now);
+    this.#afterDraftChange(now);
   }
 
   // Called by the server when a player's 30-second grace period ends (R6.7, R6.8).
@@ -257,6 +266,7 @@ export class Room {
     const wasHost = playerId === this.hostId;
     if (this.phase === 'lobby') this.#removePlayer(playerId);
     if (wasHost) this.#handOverHost(playerId);
+    this.#syncFaceoff();
     this.#touch();
     return true;
   }
