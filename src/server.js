@@ -377,7 +377,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 3000;
   app.http.listen(port, () => console.log(`Battle Draft listening on http://localhost:${port}`));
   const url = databaseUrl();
-  if (!url) console.log('[pool] DATABASE_URL not set: community pool switched off');
+  if (!url) {
+    // Names only, never values: helps spot a setting saved under a different name or place.
+    let files = [];
+    try { files = readdirSync('/etc/secrets'); } catch { /* none */ }
+    const vars = Object.keys(process.env).filter((k) => /DATA|DB|PG|POSTGRES|NEON|URL/i.test(k));
+    console.log(`[pool] DATABASE_URL not set: community pool switched off. Secret files: ${files.join(', ') || 'none'}. Related variable names: ${vars.join(', ') || 'none'}`);
+  }
   else {
     const connect = async (attempt = 1) => {
       try {
