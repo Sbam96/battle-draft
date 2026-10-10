@@ -1,49 +1,51 @@
-// End phase (R4): after the draft, each unused bin/respin is one token. In turn order, each player gets
-// one timed go to spend tokens on: swapping two of their characters, picking from the bin, or one extra spin.
-// Tokens only work on roles that already have a character — they never fill a gap left by a timeout.
-// Works directly on the finished draft's teams, pool and bin.
+// End phase (R4, revised 10 Oct 2026): after the draft, each unused bin/respin is one token.
+// Everyone spends their tokens AT THE SAME TIME, against one shared timer (50 s for 5 roles,
+// 100 s for 10). Each token buys one of: swap two of your characters, pick a character from the bin,
+// or one extra spin. Tokens only work on roles that already have a character — never on a gap.
+// The phase ends when everyone is done (or out of tokens), or when the timer runs out.
+// Clashes are first come, first served: if two players want the same binned character, the first
+// request the server receives gets it. Extra spins draw from the shared wheel, so no one lands the same character.
 
 import { randomInt } from 'node:crypto';
 import { DraftError, SPIN_MS } from './draft.js';
+
+const AFTER_SPIN_MS = SPIN_MS + 10_000; // a player who spins near the end always gets time to decide
 
 export class EndPhase {
   constructor(draft, { random = (n) => randomInt(n) } = {}) {
     this.d = draft;
     this.random = random;
-    this.goMs = draft.roleCount * 10_000; // 50 s for 5 roles, 100 s for 10 (same as voting)
+    this.goMs = draft.roleCount * 10_000;
     this.tokens = new Map(draft.order.map((p) => [p, draft.binsLeft.get(p) ?? 0]));
-    this.hadGo = new Set();
-    this.go = null;
-    this.lastIndex = -1;
+    this.players = new Map(); // pid -> { stage: 'choose' | 'extra' | 'done', landed, spin }
+    this.deadline = null;
     this.finished = false;
   }
 
   #filled(pid) { return (this.d.teams.get(pid) || []).filter((x) => x !== null).length; }
 
-  // A player only gets a go if they have tokens and at least one placed character.
-  begin(now) { this.#nextGo(now); }
-
-  #nextGo(now) {
-    this.go = null;
-    const order = this.d.order;
-    for (let step = 1; step <= order.length; step += 1) {
-      const i = (this.lastIndex + step) % order.length;
-      const pid = order[i];
-      if (this.hadGo.has(pid)) continue;
-      if ((this.tokens.get(pid) ?? 0) > 0 && this.#filled(pid) > 0) {
-        this.lastIndex = i;
-        this.go = { playerId: pid, stage: 'choose', landed: null, spin: null, startedAt: now, deadline: now + this.goMs };
-        return;
-      }
-      this.hadGo.add(pid); // nothing to spend: skip
+  begin(now) {
+    for (const pid of this.d.order) {
+      const active = (this.tokens.get(pid) ?? 0) > 0 && this.#filled(pid) > 0;
+      this.players.set(pid, { stage: active ? 'choose' : 'done', landed: null, spin: null });
+      if (!active) this.tokens.set(pid, 0);
     }
-    this.finished = true;
+    this.deadline = now + this.goMs;
+    this.#checkFinished();
+  }
+
+  #state(pid) {
+    if (this.finished) throw new DraftError('END_OVER', 'The end phase is over.');
+    const p = this.players.get(pid);
+    if (!p) throw new DraftError('NOT_PLAYING', 'You’re not in this game.');
+    if (p.stage === 'done') throw new DraftError('YOU_ARE_DONE', 'You’ve finished your changes.');
+    return p;
   }
 
   #require(pid, stage) {
-    if (this.finished || !this.go) throw new DraftError('END_OVER', 'The end phase is over.');
-    if (this.go.playerId !== pid) throw new DraftError('NOT_YOUR_GO', 'It’s not your go.');
-    if (stage && this.go.stage !== stage) throw new DraftError('WRONG_STEP', 'Finish what you’re doing first.');
+    const p = this.#state(pid);
+    if (p.stage !== stage) throw new DraftError('WRONG_STEP', 'Finish what you’re doing first.');
+    return p;
   }
 
   #spend(pid) {
@@ -62,15 +64,23 @@ export class EndPhase {
 
   #note(entry, now) { this.d.log.push({ ...entry, at: now }); if (this.d.log.length > 30) this.d.log.shift(); }
 
-  #endGoIfSpent(now) {
-    if ((this.tokens.get(this.go.playerId) ?? 0) === 0 && this.go.stage === 'choose') this.#finishGo(now);
+  // A player who has spent everything (and isn't mid-spin) is done.
+  #doneIfSpent(pid) {
+    const p = this.players.get(pid);
+    if (p && p.stage === 'choose' && (this.tokens.get(pid) ?? 0) === 0) p.stage = 'done';
+    this.#checkFinished();
   }
 
-  #finishGo(now) {
-    const pid = this.go.playerId;
-    this.hadGo.add(pid);
-    this.tokens.set(pid, 0); // unused tokens are lost when the go ends
-    this.#nextGo(now);
+  #finish(pid) {
+    const p = this.players.get(pid);
+    if (!p) return;
+    p.stage = 'done'; p.landed = null;
+    this.tokens.set(pid, 0); // unused tokens are lost
+    this.#checkFinished();
+  }
+
+  #checkFinished() {
+    if ([...this.players.values()].every((p) => p.stage === 'done')) { this.finished = true; this.deadline = null; }
   }
 
   swap(pid, roleA, roleB, now) {
@@ -82,13 +92,13 @@ export class EndPhase {
     const team = this.d.teams.get(pid);
     [team[a], team[b]] = [team[b], team[a]];
     this.#note({ kind: 'swapped', playerId: pid, roles: [a, b] }, now);
-    this.#endGoIfSpent(now);
+    this.#doneIfSpent(pid);
   }
 
   pickFromBin(pid, charId, role, now) {
     this.#require(pid, 'choose');
     const r = this.#filledRole(pid, role);
-    if (!this.d.binned.includes(charId)) throw new DraftError('NOT_IN_BIN', 'That character isn’t in the bin any more.');
+    if (!this.d.binned.includes(charId)) throw new DraftError('NOT_IN_BIN', 'Someone else just took that character, or it’s no longer in the bin. Pick another.');
     this.#spend(pid);
     const team = this.d.teams.get(pid);
     const replaced = team[r];
@@ -96,71 +106,78 @@ export class EndPhase {
     this.d.binned = this.d.binned.filter((id) => id !== charId);
     this.d.binned.push(replaced);
     this.#note({ kind: 'binPick', playerId: pid, charId, replaced, role: r }, now);
-    this.#endGoIfSpent(now);
+    this.#doneIfSpent(pid);
   }
 
   extraSpin(pid, now) {
-    this.#require(pid, 'choose');
+    const p = this.#require(pid, 'choose');
     if (!this.d.pool.length) throw new DraftError('POOL_EMPTY', 'The wheel is empty.');
     this.#spend(pid);
     const wheel = [...this.d.pool];
     const landed = wheel[this.random(wheel.length)];
     this.d.pool = this.d.pool.filter((id) => id !== landed);
     this.d.spinCount += 1;
-    this.go.stage = 'extra';
-    this.go.landed = landed;
-    this.go.spin = { id: this.d.spinCount, wheel, landed, at: now };
-    this.go.deadline = Math.max(this.go.deadline, now + SPIN_MS + 10_000); // always time to decide after the spin
+    p.stage = 'extra';
+    p.landed = landed;
+    p.spin = { id: this.d.spinCount, wheel, landed, at: now };
+    this.deadline = Math.max(this.deadline ?? 0, now + AFTER_SPIN_MS);
   }
 
-  // After an extra spin: put the new character in a filled role (replaced one goes to the bin), or let it go.
+  // After an extra spin: put the new character in a filled role (the replaced one goes to the bin), or let it go.
   keepExtra(pid, role, now) {
-    this.#require(pid, 'extra');
+    const p = this.#require(pid, 'extra');
     const r = this.#filledRole(pid, role);
     const team = this.d.teams.get(pid);
     const replaced = team[r];
-    team[r] = this.go.landed;
+    team[r] = p.landed;
     this.d.binned.push(replaced);
-    this.#note({ kind: 'extraKept', playerId: pid, charId: this.go.landed, replaced, role: r }, now);
-    this.go.stage = 'choose'; this.go.landed = null;
-    this.#endGoIfSpent(now);
+    this.#note({ kind: 'extraKept', playerId: pid, charId: p.landed, replaced, role: r }, now);
+    p.stage = 'choose'; p.landed = null;
+    this.#doneIfSpent(pid);
   }
 
   declineExtra(pid, now) {
-    this.#require(pid, 'extra');
-    this.d.binned.push(this.go.landed);
-    this.#note({ kind: 'extraDeclined', playerId: pid, charId: this.go.landed }, now);
-    this.go.stage = 'choose'; this.go.landed = null;
-    this.#endGoIfSpent(now);
+    const p = this.#require(pid, 'extra');
+    this.d.binned.push(p.landed);
+    this.#note({ kind: 'extraDeclined', playerId: pid, charId: p.landed }, now);
+    p.stage = 'choose'; p.landed = null;
+    this.#doneIfSpent(pid);
   }
 
   done(pid, now) {
-    this.#require(pid);
-    if (this.go.stage === 'extra') this.declineExtra(pid, now);
-    if (this.go?.playerId === pid) this.#finishGo(now);
+    const p = this.#state(pid);
+    if (p.stage === 'extra') this.declineExtra(pid, now);
+    this.#finish(pid);
   }
 
-  dueAt() { return this.go?.deadline ?? null; }
+  dueAt() { return this.finished ? null : this.deadline; }
 
+  // Time's up for everyone still deciding: any extra-spin character they haven't placed goes to the bin.
   timeout(now) {
-    if (!this.go) return false;
-    const pid = this.go.playerId;
-    if (this.go.stage === 'extra') { this.d.binned.push(this.go.landed); this.#note({ kind: 'extraDeclined', playerId: pid, charId: this.go.landed, timedOut: true }, now); }
-    this.#note({ kind: 'goTimeout', playerId: pid }, now);
-    this.#finishGo(now);
+    if (this.finished) return false;
+    for (const [pid, p] of this.players) {
+      if (p.stage === 'done') continue;
+      if (p.stage === 'extra') { this.d.binned.push(p.landed); this.#note({ kind: 'extraDeclined', playerId: pid, charId: p.landed, timedOut: true }, now); }
+      this.#note({ kind: 'goTimeout', playerId: pid }, now);
+      p.stage = 'done'; p.landed = null;
+      this.tokens.set(pid, 0);
+    }
+    this.finished = true;
+    this.deadline = null;
     return true;
   }
 
-  removePlayer(pid, now) {
+  removePlayer(pid) {
+    const p = this.players.get(pid);
+    if (p?.stage === 'extra') this.d.binned.push(p.landed);
+    this.players.delete(pid);
     this.tokens.delete(pid);
-    this.hadGo.add(pid);
-    if (this.go?.playerId === pid) {
-      if (this.go.stage === 'extra') this.d.binned.push(this.go.landed);
-      this.#nextGo(now);
-    }
+    this.#checkFinished();
   }
 
   view() {
-    return { tokens: Object.fromEntries(this.tokens), go: this.go && { ...this.go }, goMs: this.goMs, finished: this.finished, hadGo: [...this.hadGo] };
+    const players = {};
+    for (const [pid, p] of this.players) players[pid] = { stage: p.stage, landed: p.landed, spin: p.spin && { ...p.spin } };
+    return { tokens: Object.fromEntries(this.tokens), players, deadline: this.deadline, goMs: this.goMs, finished: this.finished };
   }
 }

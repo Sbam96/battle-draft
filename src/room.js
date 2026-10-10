@@ -573,7 +573,7 @@ export class Room {
     for (const team of d.teams.values()) team.forEach(add);
     d.binned.forEach(add);
     for (const e of d.log) { add(e.charId); add(e.released); add(e.replaced); add(e.returned); }
-    if (this.endPhase?.go) { add(this.endPhase.go.landed); add(this.endPhase.go.spin?.landed); }
+    if (this.endPhase) for (const p of this.endPhase.players.values()) { add(p.landed); add(p.spin?.landed); }
     if (this.faceoff) for (const team of this.faceoff.teams.values()) team.forEach(add);
     const out = {};
     for (const id of ids) if (byId.has(id)) out[id] = byId.get(id);

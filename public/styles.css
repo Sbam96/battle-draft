@@ -476,3 +476,9 @@ select:focus-visible { outline: 3px solid var(--pink); outline-offset: 1px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* End phase: who is still deciding (everyone plays at once) */
+.end-progress { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.end-progress li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.end-status { font-size: 0.8rem; font-weight: 700; border: 2px solid var(--gold-deep); border-radius: 999px; padding: 0 10px; }
+.end-status.done { border-color: var(--teal); color: var(--teal); }

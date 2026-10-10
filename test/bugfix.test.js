@@ -17,7 +17,7 @@ function toFaceoff(playerCount = 3) {
     r.draftAction(p, 'spin', {}, T0);
     r.draftAction(p, 'place', { role: r.draft.teams.get(p).indexOf(null) }, T0);
   }
-  while (r.phase === 'endphase') r.endAction(r.endPhase.go.playerId, 'endDone', {}, T0);
+  while (r.phase === 'endphase') for (const id of [...r.endPhase.players.keys()]) if (r.phase === 'endphase' && r.endPhase.players.get(id).stage !== 'done') r.endAction(id, 'endDone', {}, T0);
   assert.equal(r.phase, 'faceoff');
   const m = r.faceoff.match;
   const neutrals = r.players.map((p) => p.id).filter((id) => id !== m.a && id !== m.b);

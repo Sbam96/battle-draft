@@ -30,7 +30,7 @@ function playToChampion(r) {
       if (!binned) { binned = true; r.draftAction(p, 'bin', {}, T0); r.draftAction(p, 'spin', {}, T0); }
       r.draftAction(p, 'place', { role: r.draft.teams.get(p).indexOf(null) }, T0);
     } else if (r.phase === 'endphase') {
-      r.endAction(r.endPhase.go.playerId, 'endDone', {}, T0);
+      for (const id of [...r.endPhase.players.keys()]) if (r.phase === 'endphase' && r.endPhase.players.get(id).stage !== 'done') r.endAction(id, 'endDone', {}, T0);
     } else if (r.phase === 'faceoff') {
       const m = r.faceoff.match;
       if (m.stage === 'voting') {

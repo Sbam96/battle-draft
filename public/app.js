@@ -395,9 +395,9 @@ const actions = {
   pickBinChar(el) { state.binChoice = el.dataset.id; render(); },
   async endRole(el) {
     const role = Number(el.dataset.role);
-    const go = state.view?.end?.go;
+    const mine = state.view?.end?.players?.[state.view.you];
     let r = { ok: true };
-    if (go?.stage === 'extra') r = await emit('keepExtra', { role });
+    if (mine?.stage === 'extra') r = await emit('keepExtra', { role });
     else if (state.endMode === 'swap') {
       if (state.endFirst === null) { state.endFirst = role; render(); return; }
       if (state.endFirst === role) { state.endFirst = null; render(); return; }
@@ -1154,7 +1154,7 @@ function logLine(v, e) {
     case 'binPick': return html`${p} picked ${charName(e.charId)} from the bin as ${role(e.role)}. ${charName(e.replaced)} went in the bin.`;
     case 'extraKept': return html`${p} took an extra spin and kept ${charName(e.charId)} as ${role(e.role)}. ${charName(e.replaced)} went in the bin.`;
     case 'extraDeclined': return html`${p} ${e.timedOut ? 'ran out of time on an extra spin' : 'let an extra spin go'}. ${charName(e.charId)} went in the bin.`;
-    case 'goTimeout': return html`${p}’s time ran out.`;
+    case 'goTimeout': return html`${p} ran out of time for changes.`;
     default: return '';
   }
 }
@@ -1290,22 +1290,25 @@ function draftScreen(v) {
 }
 
 // ---------- end phase (phase 4) ----------
+// Everyone makes their final changes at the same time, against one shared timer (R4.2).
 function endPhaseScreen(v) {
   const d = v.draft;
   const e = v.end;
-  const go = e.go;
-  const mine = go?.playerId === v.you;
-  const who = pName(v, go?.playerId);
+  const me = e.players?.[v.you] || null;
+  const active = !!me && me.stage !== 'done' && !e.finished;
   const tokens = e.tokens[v.you] ?? 0;
-  const revealed = go?.spin && state.shownSpinId === go.spin.id;
-  const team = d.teams[go?.playerId] || [];
-  const mode = go?.stage === 'extra' ? 'extra' : state.endMode;
-  // Which roles are tappable for the active player right now.
-  const canTap = (i) => mine && team[i] != null && (go.stage === 'extra' ? revealed : mode === 'swap' || (mode === 'bin' && state.binChoice));
-  const tapLabel = go?.stage !== 'extra' && mode === 'swap' ? (state.endFirst === null ? 'Swap' : 'Swap with') : 'Replace';
+  const revealed = me?.spin && state.shownSpinId === me.spin.id;
+  const team = d.teams[v.you] || [];
+  if (state.binChoice && !d.bin.includes(state.binChoice)) state.binChoice = null; // someone else took it
+  const mode = me?.stage === 'extra' ? 'extra' : state.endMode;
+  const deciding = Object.entries(e.players || {}).filter(([, p]) => p.stage !== 'done').map(([pid]) => pid);
+  const others = deciding.filter((pid) => pid !== v.you);
+  // Which of my roles are tappable right now.
+  const canTap = (i) => active && team[i] != null && (me.stage === 'extra' ? revealed : mode === 'swap' || (mode === 'bin' && state.binChoice));
+  const tapLabel = me?.stage !== 'extra' && mode === 'swap' ? (state.endFirst === null ? 'Swap' : 'Swap with') : 'Replace';
   const formationEnd = html`<ol class="formation">${v.settings.roles.map((role, i) => {
     const id = team[i];
-    const picked = mine && mode === 'swap' && state.endFirst === i;
+    const picked = active && mode === 'swap' && state.endFirst === i;
     return html`<li class="${id == null ? 'empty' : ''} ${picked ? 'picked' : ''}">
       <span class="pos" aria-hidden="true">${i + 1}</span><span class="slot-role">${role}</span>
       ${canTap(i)
@@ -1315,13 +1318,16 @@ function endPhaseScreen(v) {
   })}</ol>`;
 
   let controls;
-  if (!go) controls = html`<p class="prompt">Getting the face-off ready…</p>`;
-  else if (!mine) controls = html`<p class="prompt">${who} is making final changes to their team.</p>`;
-  else if (go.stage === 'extra') {
+  if (e.finished) controls = html`<p class="prompt">Getting the face-off ready…</p>`;
+  else if (!active) {
+    controls = html`<p class="prompt">${me ? 'You’re done.' : 'You’re watching.'} ${others.length
+      ? `Waiting for ${others.map((pid) => pName(v, pid)).join(', ')}.`
+      : 'The face-off is about to start.'}</p>`;
+  } else if (me.stage === 'extra') {
     controls = revealed
-      ? html`${charCard(go.landed, 'Extra spin')}
-          <p class="prompt">Tap a role below to replace it with ${charName(go.landed)}, or let it go.</p>
-          <button class="btn" data-action="declineExtra">Don’t keep ${charName(go.landed)}</button>`
+      ? html`${charCard(me.landed, 'Extra spin')}
+          <p class="prompt">Tap a role below to replace it with ${charName(me.landed)}, or let it go.</p>
+          <button class="btn" data-action="declineExtra">Don’t keep ${charName(me.landed)}</button>`
       : html`<p class="prompt">Spinning…</p>`;
   } else {
     const bin = d.bin;
@@ -1333,7 +1339,7 @@ function endPhaseScreen(v) {
       </div>
       ${mode === 'swap' ? html`<p class="hint center">${state.endFirst === null ? 'Tap the first role to swap.' : `Now tap the role to swap ${charName(team[state.endFirst])} with.`}</p>` : ''}
       ${mode === 'bin' ? (bin.length ? html`
-        <p class="hint center">${state.binChoice ? `Now tap the role ${charName(state.binChoice)} should replace.` : 'Pick a character from the bin.'}</p>
+        <p class="hint center">${state.binChoice ? `Now tap the role ${charName(state.binChoice)} should replace.` : 'Pick a character from the bin. First to grab one gets it.'}</p>
         <ul class="bin-list">${bin.map((id) => html`<li><button class="chip ${state.binChoice === id ? 'on' : ''}" data-action="pickBinChar" data-id="${id}" aria-pressed="${state.binChoice === id}">${charName(id)}</button></li>`)}</ul>`
         : html`<p class="hint center">The bin is empty, so there’s nobody to pick.</p>`) : ''}
       ${mode === 'extra' ? html`<p class="hint center">Spin once more. If you like who you land, they replace one of your characters.</p>
@@ -1341,12 +1347,18 @@ function endPhaseScreen(v) {
       <button class="btn btn-ghost btn-small" data-action="endDone">I’m done${tokens ? ` (lose ${tokens} unused)` : ''}</button>`;
   }
 
+  const status = (pid) => {
+    const p = e.players?.[pid];
+    if (!p || p.stage === 'done') return html`<span class="end-status done">Done</span>`;
+    return html`<span class="end-status">${p.stage === 'extra' ? 'Spinning' : 'Deciding'}</span>`;
+  };
+
   return html`
     <header class="turn-banner">
-      <p class="round">Final changes</p>
-      <h2>${mine ? 'Your go' : `${who}’s go`}</h2>
-      ${tokens && !mine ? html`<p class="tokens"><span>Your tokens: ${tokens}</span></p>` : ''}
-      ${countdownFor(go?.deadline, e.goMs)}
+      <p class="round">Final changes · everyone at once</p>
+      <h2>${active ? 'Make your changes' : e.finished ? 'All done' : 'Waiting for the others'}</h2>
+      <p class="tokens"><span>${deciding.length} of ${d.order.length} still deciding</span></p>
+      ${countdownFor(e.deadline, e.goMs)}
     </header>
     <div class="draft-grid">
       <section class="wheel-col">
@@ -1354,7 +1366,11 @@ function endPhaseScreen(v) {
         <div class="action-area">${controls}</div>
       </section>
       <section class="team-col">
-        <div class="panel"><h3>${mine ? 'Your team' : `${who}’s team`}</h3>${formationEnd}</div>
+        <div class="panel"><h3>Your team</h3>${formationEnd}</div>
+        <div class="panel">
+          <h3>Players</h3>
+          <ul class="end-progress">${d.order.map((pid) => html`<li><span>${pName(v, pid)}${pid === v.you ? ' (you)' : ''}</span>${status(pid)}</li>`)}</ul>
+        </div>
         <div class="panel">
           <h3>What’s happened</h3>
           ${d.log.length ? html`<ul class="feed">${[...d.log].reverse().slice(0, 8).map((x) => html`<li>${logLine(v, x)}</li>`)}</ul>` : ''}
@@ -1555,7 +1571,7 @@ function syncWheel(v) {
     const t = d.turn;
     if (t?.spin && (t.stage === 'landed' || t.stage === 'compare')) spin = t.spin;
     held = t?.held ?? null;
-  } else if (v.phase === 'endphase' && v.end?.go?.stage === 'extra') spin = v.end.go.spin;
+  } else if (v.phase === 'endphase' && v.end?.players?.[v.you]?.stage === 'extra') spin = v.end.players[v.you].spin;
   if (spin) {
     w.setSegments(spin.wheel, names);
     loadImage(spin.landed);
