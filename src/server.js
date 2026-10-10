@@ -16,8 +16,35 @@ import { GRACE_MS, EMPTY_ROOM_TTL_MS, maxPlayersFor, PLACEMENT_TIMER_OPTIONS } f
 
 // The database address can be an environment variable or a Render "Secret File"
 // (Render puts secret files in /etc/secrets). Any secret file holding a postgres:// address works.
+// Accepts the formats Neon shows: a connection string (also inside a psql command or DATABASE_URL=...),
+// "parameters only" lines (PGHOST=..., PGUSER=...), or libpq style (host=... user=... password=...).
+export function addressFrom(text) {
+  const t = String(text ?? '');
+  const m = t.match(/(postgres(?:ql)?:\/\/[^\s"'`]+)/i);
+  if (m) return { url: m[1].replace(/^postgres(ql)?:/i, 'postgresql:'), format: 'connection string' };
+  const kv = {};
+  for (const match of t.matchAll(/\b([A-Za-z_]+)\s*[=:]\s*(?:'([^']*)'|"([^"]*)"|([^\s'"]+))/g)) {
+    kv[match[1].toLowerCase()] = match[2] ?? match[3] ?? match[4];
+  }
+  const host = kv.pghost || kv.host;
+  const user = kv.pguser || kv.user;
+  const password = kv.pgpassword || kv.password;
+  const db = kv.pgdatabase || kv.dbname || kv.database;
+  const port = kv.pgport || kv.port;
+  if (!host || !user || !password || !db) return null;
+  const url = `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}${port ? `:${port}` : ''}/${encodeURIComponent(db)}?sslmode=require`;
+  return { url, format: kv.pghost ? 'PGHOST parameters' : 'host= parameters' };
+}
+
+// Describes a secret's shape without revealing it: lines, length, and setting names only.
+function describeShape(text) {
+  const t = String(text ?? '');
+  const keys = [...t.matchAll(/\b([A-Za-z_]{2,})\s*[=:]/g)].map((x) => x[1]).slice(0, 8);
+  return `It has ${t.trim().split(/\r?\n/).length} line(s), ${t.trim().length} characters, setting names: ${keys.join(', ') || 'none'}.`;
+}
+
 export function databaseUrl(env = process.env, dir = '/etc/secrets') {
-  if (env.DATABASE_URL) return env.DATABASE_URL.trim();
+  if (env.DATABASE_URL) return addressFrom(env.DATABASE_URL)?.url ?? env.DATABASE_URL.trim();
   let names = [];
   try { names = readdirSync(dir); } catch { return null; } // no secret files
   // Look at a file called DATABASE_URL first; skip Render's hidden folders and anything unreadable.
@@ -29,9 +56,9 @@ export function databaseUrl(env = process.env, dir = '/etc/secrets') {
       if (!statSync(path.join(dir, name)).isFile()) continue;
       text = readFileSync(path.join(dir, name), 'utf8');
     } catch { continue; }
-    const m = text.match(/(postgres(?:ql)?:\/\/[^\s"']+)/);
-    if (m) { console.log(`[pool] using the database address from the secret file "${name}"`); return m[1]; }
-    if (name === 'DATABASE_URL') console.log('[pool] the secret file "DATABASE_URL" doesn’t contain a postgresql:// address');
+    const found = addressFrom(text);
+    if (found) { console.log(`[pool] using the database address from the secret file "${name}" (${found.format})`); return found.url; }
+    if (name === 'DATABASE_URL') console.log(`[pool] the secret file "DATABASE_URL" has no usable address. ${describeShape(text)}`);
   }
   return null;
 }
