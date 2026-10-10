@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { readdirSync, readFileSync } from 'node:fs';
 import { Room, GameError } from './room.js';
 import { mountAdmin } from './admin.js';
 import { mountPool } from './poolRoutes.js';
@@ -12,6 +13,20 @@ import { PoolStore, PoolError } from './pool.js';
 import { openDb } from './db.js';
 import { roomId } from './ids.js';
 import { GRACE_MS, EMPTY_ROOM_TTL_MS, maxPlayersFor, PLACEMENT_TIMER_OPTIONS } from './config.js';
+
+// The database address can be an environment variable or a Render "Secret File"
+// (Render puts secret files in /etc/secrets). Any secret file holding a postgres:// address works.
+export function databaseUrl(env = process.env, dir = '/etc/secrets') {
+  if (env.DATABASE_URL) return env.DATABASE_URL.trim();
+  try {
+    for (const name of readdirSync(dir)) {
+      const text = readFileSync(path.join(dir, name), 'utf8').trim();
+      const m = text.match(/(?:DATABASE_URL\s*=\s*)?["']?(postgres(?:ql)?:\/\/[^\s"']+)/);
+      if (m) { console.log(`[pool] using the database address from the secret file "${name}"`); return m[1]; }
+    }
+  } catch { /* no secret files */ }
+  return null;
+}
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
@@ -361,7 +376,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const app = createApp();
   const port = Number(process.env.PORT) || 3000;
   app.http.listen(port, () => console.log(`Battle Draft listening on http://localhost:${port}`));
-  const url = process.env.DATABASE_URL;
+  const url = databaseUrl();
   if (!url) console.log('[pool] DATABASE_URL not set: community pool switched off');
   else {
     const connect = async (attempt = 1) => {
