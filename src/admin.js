@@ -3,6 +3,7 @@
 
 import express from 'express';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { sendError } from './poolRoutes.js';
 
 const SESSION_MS = 8 * 60 * 60 * 1000;
 const MAX_FAILS = 5;
@@ -21,7 +22,7 @@ function readCookie(req, name) {
   return null;
 }
 
-export function mountAdmin(app, { credentials, reports, now = () => Date.now() }) {
+export function mountAdmin(app, { credentials, reports, pool = () => null, now = () => Date.now() }) {
   const sessions = new Map(); // token -> expiry
   const fails = new Map(); // ip -> { count, until }
   const enabled = Boolean(credentials?.username && credentials?.password);
@@ -69,10 +70,29 @@ export function mountAdmin(app, { credentials, reports, now = () => Date.now() }
     res.json({ ok: true });
   });
 
-  router.get('/api/reports', (req, res) => {
+  const guard = (req, res, next) => {
     if (!enabled || !loggedIn(req)) return res.status(401).json({ message: 'Sign in first.' });
-    res.json({ reports: [...reports].reverse() });
-  });
+    next();
+  };
+  const needPool = (req, res, next) => (pool() ? next() : res.status(503).json({ message: 'The community pool database isn’t connected. Add DATABASE_URL in Render.' }));
+  const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((err) => sendError(res, err));
+
+  // Reports kept in memory since the last restart (also stored in the database when it's connected).
+  router.get('/api/reports', guard, (req, res) => res.json({ reports: [...reports].reverse() }));
+
+  // Everything waiting for the admin, in one call.
+  router.get('/api/overview', guard, wrap(async (req, res) => {
+    if (!pool()) return res.json({ poolConnected: false, reports: [...reports].reverse() });
+    res.json({ poolConnected: true, ...(await pool().adminOverview()) });
+  }));
+  router.post('/api/access/:id', guard, needPool, wrap(async (req, res) => res.json(await pool().decideAccess(req.params.id, Boolean(req.body?.approve), credentials.username))));
+  router.post('/api/images/:id', guard, needPool, wrap(async (req, res) => { await pool().decideImage(req.params.id, Boolean(req.body?.approve)); res.json({ ok: true }); }));
+  router.post('/api/contributors', guard, needPool, wrap(async (req, res) => { await pool().addContributor(req.body?.identity, credentials.username); res.json({ ok: true }); }));
+  router.delete('/api/contributors/:id', guard, needPool, wrap(async (req, res) => { await pool().removeContributor(req.params.id); res.json({ ok: true }); }));
+  router.post('/api/handled', guard, needPool, wrap(async (req, res) => { await pool().setHandled(req.body?.table, req.body?.id, req.body?.handled !== false); res.json({ ok: true }); }));
+  router.delete('/api/pool/characters/:id', guard, needPool, wrap(async (req, res) => { await pool().deleteCharacter(req.params.id); res.json({ ok: true }); }));
+  router.get('/api/pool/verses', guard, needPool, wrap(async (req, res) => res.json({ verses: await pool().listVerses() })));
+  router.get('/api/pool/verses/:id', guard, needPool, wrap(async (req, res) => res.json({ characters: await pool().verseCharacters(req.params.id) })));
 
   app.use('/admin', router);
 }

@@ -58,14 +58,35 @@ const state = {
   ballots: {}, // matchId -> { role: 'a' | 'b' }
   judgeDecision: {},
   img: new Map(), // charId -> 'loading' | 'ok' | 'fail'
+  // community pool
+  pool: {
+    verses: [], loaded: false, verseId: null, characters: [], identity: store.get('bd-pool-id') || '', status: null,
+    addTab: 'paste', addVerse: '', result: null, busy: false, error: '', note: '', search: '',
+  },
+  lobbyPool: { verses: null, picked: [], busy: false },
+  contactSent: false,
   form: {
     name: store.get('bd-name') || '', roomName: '', visibility: 'private', roleCount: 5,
     roles: Array(10).fill(''), cap: 8, turnOrder: 'join', releasedHoldToBin: 'yes', timer: 'off',
     charName: '', charImage: '', charPaste: '', charVerse: '', charSearch: '',
+    poolIdentity: store.get('bd-pool-id') || '', poolNote: '', poolName: '', poolImage: '', poolPaste: '', poolNewVerse: '', poolSearch: '',
+    contactName: '', contactReply: '', contactMessage: '',
   },
 };
 
-fetch('/config').then((r) => r.json()).then((c) => { state.config = c; if (state.screen === 'create') render(); }).catch(() => {});
+fetch('/config').then((r) => r.json()).then((c) => { state.config = c; render(); }).catch(() => {});
+
+// JSON calls to the pool endpoints. Always resolves to { ok, ...body } with a readable message on failure.
+async function api(path, body) {
+  try {
+    const opts = body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+    const r = await fetch(path, opts);
+    const j = await r.json().catch(() => ({}));
+    return r.ok ? { ok: true, ...j } : { ok: false, ...j, message: j.message || 'Something went wrong. Try again.' };
+  } catch {
+    return { ok: false, message: 'You’re offline. Check your connection and try again.' };
+  }
+}
 
 // Waits briefly for the connection (e.g. straight after opening an invite link) before sending.
 function connected(ms = 8000) {
@@ -110,6 +131,8 @@ function notice(title, message) {
 async function route() {
   const m = location.pathname.match(/^\/r\/([A-Za-z0-9_-]+)/);
   if (m) await openRoomLink(m[1]);
+  else if (location.pathname === '/pool') await actions.openPool();
+  else if (location.pathname === '/contact') go('contact', { contactSent: false });
   else go('home');
 }
 window.addEventListener('popstate', route);
@@ -170,6 +193,45 @@ async function requestJoin(name) {
   go('waiting');
 }
 
+async function refreshPoolStatus() {
+  const r = await api('/api/pool/status', { identity: state.pool.identity });
+  if (r.ok) state.pool.status = r; else { state.pool.status = null; state.pool.error = r.message; }
+}
+
+async function poolAdd(text, source, fileName) {
+  const p = state.pool;
+  const body = { identity: p.identity, text, source };
+  if (p.addVerse === 'new' || !p.addVerse) body.verseName = state.form.poolNewVerse; else body.verseId = Number(p.addVerse);
+  p.busy = true; render();
+  const r = await api('/api/pool/add', body);
+  p.busy = false;
+  p.result = r.ok ? { ...r, fileName } : { error: r.message };
+  if (r.ok) {
+    const v = await api('/api/pool/verses');
+    if (v.ok) p.verses = v.verses;
+    p.addVerse = String(r.verse.id);
+    if (p.verseId === r.verse.id || p.verseId === null) {
+      p.verseId = r.verse.id;
+      const c = await api(`/api/pool/verses/${r.verse.id}`);
+      p.characters = c.characters || [];
+    }
+  }
+  render();
+  return r.ok;
+}
+
+async function loadVerses(ids) {
+  if (!ids.length) { toast('Pick at least one verse.'); return; }
+  state.lobbyPool.busy = true; render();
+  const res = await emit('loadPool', { verseIds: ids });
+  state.lobbyPool.busy = false;
+  if (!res.ok) { state.importResult = { error: res.message }; render(); return; }
+  state.lobbyPool.picked = [];
+  const names = res.verses.map((x) => x.verse).join(', ');
+  state.importResult = { ...res, fileName: names };
+  render();
+}
+
 async function importText(text, source, fileName) {
   state.importing = true; render();
   const res = await emit('addCharacters', { text, source, verse: state.form.charVerse });
@@ -181,6 +243,57 @@ async function importText(text, source, fileName) {
 
 const actions = {
   home: () => { setPath('/'); go('home'); },
+  contactPage() { setPath('/contact'); go('contact', { contactSent: false }); },
+  // ---- community pool ----
+  async openPool() {
+    setPath('/pool');
+    go('pool');
+    state.pool.verseId = null;
+    const r = await api('/api/pool/verses');
+    state.pool.loaded = true;
+    state.pool.error = r.ok ? '' : r.message;
+    state.pool.verses = r.verses || [];
+    if (state.pool.identity) await refreshPoolStatus();
+    render();
+  },
+  async openVerse(el) {
+    const id = Number(el.dataset.id);
+    state.pool.verseId = id; state.pool.characters = []; state.pool.result = null; state.form.poolSearch = '';
+    state.pool.addVerse = String(id);
+    render(); window.scrollTo(0, 0);
+    const r = await api(`/api/pool/verses/${id}`);
+    state.pool.characters = r.characters || [];
+    render();
+  },
+  allVerses() { state.pool.verseId = null; state.pool.result = null; render(); },
+  poolSignOut() { state.pool.identity = ''; state.pool.status = null; store.set('bd-pool-id', ''); render(); },
+  poolTab(el) { state.pool.addTab = el.dataset.tab; state.pool.result = null; render(); },
+  poolVerseChange(el) { state.pool.addVerse = el.value; render(); },
+  dismissPoolResult() { state.pool.result = null; render(); },
+  async poolUpload(el) {
+    const file = el.files?.[0];
+    el.value = '';
+    if (!file) return;
+    if (/\.(xlsx|xlsm|xls|numbers|ods)$/i.test(file.name)) { state.pool.result = { error: 'That’s a spreadsheet file. Save it as CSV first (File, Save As, CSV) and upload that.' }; render(); return; }
+    if (file.size > 1_000_000) { state.pool.result = { error: 'That file is too big. Keep it to 500 rows.' }; render(); return; }
+    await poolAdd(await file.text(), 'csv', file.name);
+  },
+  // ---- lobby: load from the pool ----
+  async lobbyPoolTab() {
+    state.charTab = 'pool'; state.charTabChosen = true; state.importResult = null; render();
+    const r = await api('/api/pool/verses');
+    state.lobbyPool.verses = r.ok ? r.verses : [];
+    state.lobbyPool.error = r.ok ? '' : r.message;
+    render();
+  },
+  togglePoolVerse(el) {
+    const id = Number(el.dataset.id);
+    const p = state.lobbyPool.picked;
+    state.lobbyPool.picked = p.includes(id) ? p.filter((x) => x !== id) : [...p, id];
+    render();
+  },
+  async quickLoad(el) { await loadVerses([Number(el.dataset.id)]); },
+  async loadPicked() { await loadVerses(state.lobbyPool.picked); },
   create: () => go('create'),
   async browse() {
     go('browse', { rooms: [] });
@@ -287,7 +400,7 @@ const actions = {
     const r = await emit('voteKick', { playerId: el.dataset.id });
     if (!r.ok) toast(r.message); else if (r.kicked) toast('Player removed by vote', true);
   },
-  charTab(el) { state.charTab = el.dataset.tab; state.importResult = null; render(); },
+  charTab(el) { state.charTabChosen = true; state.charTab = el.dataset.tab; state.importResult = null; render(); },
   dismissResult() { state.importResult = null; render(); },
   async removeChar(el) { const r = await emit('removeCharacter', { id: el.dataset.id }); if (!r.ok) toast(r.message); },
   askClear(el) { state.confirmClear = el.dataset.verse ?? '*'; render(); },
@@ -339,6 +452,41 @@ const forms = {
     if (state.peek?.visibility === 'public') await requestJoin(name);
     else await enterRoom(name);
   },
+  async poolSignIn() {
+    const identity = state.form.poolIdentity.trim();
+    const r = await api('/api/pool/status', { identity });
+    if (!r.ok) { state.pool.error = r.message; render(); return; }
+    state.pool.error = '';
+    state.pool.identity = r.identity; state.pool.status = r;
+    store.set('bd-pool-id', r.identity);
+    render();
+  },
+  async poolRequest() {
+    const r = await api('/api/pool/request', { identity: state.pool.identity, note: state.form.poolNote });
+    if (!r.ok) { state.pool.error = r.message; render(); return; }
+    state.form.poolNote = '';
+    await refreshPoolStatus();
+    toast(r.already === 'approved' ? 'You’re already approved' : 'Request sent to the admin', true);
+    render();
+  },
+  async poolAddOne() {
+    const f = state.form;
+    if (!f.poolName.trim()) { state.pool.result = { error: 'Type a character name.' }; render(); return; }
+    const text = [f.poolName, f.poolImage].map((x) => x.trim()).filter(Boolean).map((x) => (x.includes(',') ? `"${x.replace(/"/g, '""')}"` : x)).join(',');
+    if (await poolAdd(text, 'csv')) { f.poolName = ''; f.poolImage = ''; render(); }
+  },
+  async poolAddPaste() {
+    if (await poolAdd(state.form.poolPaste, 'paste')) { state.form.poolPaste = ''; render(); }
+  },
+  async contact() {
+    const f = state.form;
+    state.busy = true; render();
+    const r = await api('/api/contact', { name: f.contactName, replyTo: f.contactReply, message: f.contactMessage });
+    state.busy = false;
+    if (!r.ok) { state.error = r.message; render(); return; }
+    f.contactMessage = ''; state.contactSent = true; state.error = '';
+    render();
+  },
   async addOne() {
     const f = state.form;
     const text = [f.charName, f.charImage].map((x) => x.trim()).filter(Boolean).map((x) => (x.includes(',') ? `"${x.replace(/"/g, '""')}"` : x)).join(',');
@@ -370,7 +518,7 @@ $app.addEventListener('input', (e) => {
   const [key, idx] = el.dataset.field.split('.');
   if (idx !== undefined) state.form[key][Number(idx)] = el.value;
   else state.form[key] = el.value;
-  if (key === 'charSearch') render(); // filter as you type
+  if (key === 'charSearch' || key === 'poolSearch') render(); // filter as you type
 });
 $app.addEventListener('submit', (e) => {
   const form = e.target.closest('form[data-form]');
@@ -393,8 +541,10 @@ function homeScreen() {
       <div class="hero-actions">
         <button class="btn btn-primary btn-block" data-action="create">Create a game</button>
         <button class="btn btn-ghost btn-block" data-action="browse">Find a public game</button>
+        ${state.config.pool ? html`<button class="btn btn-ghost btn-block" data-action="openPool">Community pool</button>` : ''}
       </div>
       <p class="hero-foot">Got an invite link? Open it to join your friends.</p>
+      <p class="hero-foot"><a href="/contact" data-action="contactPage">Contact the admin</a></p>
     </section>`;
 }
 
@@ -495,6 +645,151 @@ function waitingScreen() {
     </div>`;
 }
 
+const plural2 = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+function poolAccessPanel() {
+  const p = state.pool;
+  const st = p.status;
+  if (!p.identity || !st) {
+    return html`<form class="panel" data-form="poolSignIn" novalidate>
+      <h3>Add characters</h3>
+      <p class="hint">Sign in with your username or email. Approved contributors can add characters; anyone can ask to be approved.</p>
+      <div class="invite" style="margin-top:12px">
+        <input type="text" data-field="poolIdentity" value="${state.form.poolIdentity}" maxlength="80" placeholder="Username or email" aria-label="Username or email" autocomplete="username">
+        <button class="btn btn-small btn-primary" type="submit">Sign in</button>
+      </div>
+      ${p.error ? html`<p class="error-text" role="alert">${p.error}</p>` : ''}
+    </form>`;
+  }
+  if (st.approved) {
+    return html`<section class="panel signed"><p>Signed in as <strong>${st.identity}</strong>. You can add characters.</p>
+      <button class="btn btn-small btn-ghost" data-action="poolSignOut">Sign out</button></section>`;
+  }
+  const pending = st.request === 'pending';
+  return html`<section class="panel">
+    <div class="signed"><p>Signed in as <strong>${st.identity}</strong>.</p><button class="btn btn-small btn-ghost" data-action="poolSignOut">Sign out</button></div>
+    ${pending
+      ? html`<p class="pool-ok" style="margin-top:10px">Your request is with the admin. Once you’re approved you’ll be able to add characters here.</p>`
+      : html`<form data-form="poolRequest" class="inline-form" novalidate>
+          <p>${st.request === 'denied' ? 'Your last request wasn’t approved. You can ask again.' : 'You’re not approved to add characters yet.'}</p>
+          <label class="label" for="pool-note">Anything the admin should know? <small>— optional</small></label>
+          <textarea id="pool-note" data-field="poolNote" rows="2" maxlength="300" placeholder="e.g. I'd like to add Jujutsu Kaisen">${state.form.poolNote}</textarea>
+          <button class="btn btn-small btn-primary" type="submit" style="justify-self:start">Request access</button>
+        </form>`}
+    ${p.error ? html`<p class="error-text" role="alert">${p.error}</p>` : ''}
+  </section>`;
+}
+
+function poolResultBox() {
+  const r = state.pool.result;
+  if (!r) return '';
+  if (r.error) return html`<div class="result result-error" role="alert"><p>${r.error}</p></div>`;
+  const n = r.notes || {};
+  return html`<div class="result" role="status">
+    <p><strong>${r.added.length ? `Added ${plural2(r.added.length, 'character')}` : 'No new characters added'}</strong> to ${r.verse.name}${r.fileName ? html` from ${r.fileName}` : ''}.</p>
+    ${r.imagesAdded.length ? html`<p>Image added to ${r.imagesAdded.join(', ')}.</p>` : ''}
+    ${r.imageRequests.length ? html`<p class="dup-head">${r.imageRequests.length === 1 ? `${r.imageRequests[0]} already has an image` : `${plural2(r.imageRequests.length, 'character')} already have images`}. Your link was sent to the admin to decide which to keep.</p>
+      ${r.imageRequests.length > 1 ? html`<ul class="dups">${r.imageRequests.slice(0, 12).map((d) => html`<li class="dup">${d}</li>`)}</ul>` : ''}` : ''}
+    ${r.duplicates.length ? html`<p class="dup-head">Already in the pool (${r.duplicates.length}):</p>
+      <ul class="dups">${r.duplicates.slice(0, 12).map((d) => html`<li class="dup">${d}</li>`)}${r.duplicates.length > 12 ? html`<li class="hint">and ${r.duplicates.length - 12} more</li>` : ''}</ul>` : ''}
+    ${n.unsafeLinks ? html`<p class="hint">${plural2(n.unsafeLinks, 'link')} wasn’t a normal web link, so the name was added without it.</p>` : ''}
+    ${n.headerSkipped ? html`<p class="hint">The header row was skipped.</p>` : ''}
+    <button class="btn btn-small" data-action="dismissPoolResult">OK</button>
+  </div>`;
+}
+
+function poolAddPanel() {
+  const p = state.pool;
+  if (!p.status?.approved) return '';
+  const tab = p.addTab;
+  const busy = raw(p.busy ? 'disabled' : '');
+  const sel = p.addVerse || (p.verseId ? String(p.verseId) : 'new');
+  return html`<section class="panel">
+    <h3>Add to the pool</h3>
+    <label class="field"><span class="label">Verse</span>
+      <select data-change="poolVerseChange" aria-label="Verse">
+        ${p.verses.map((x) => html`<option value="${x.id}" ${raw(sel === String(x.id) ? 'selected' : '')}>${x.name}</option>`)}
+        <option value="new" ${raw(sel === 'new' ? 'selected' : '')}>New verse…</option>
+      </select></label>
+    ${sel === 'new' ? html`<label class="field"><span class="label">New verse name</span>
+      <input type="text" data-field="poolNewVerse" value="${state.form.poolNewVerse}" maxlength="40" placeholder="e.g. Jujutsu Kaisen"></label>` : ''}
+    <div class="tabs" role="tablist" aria-label="How to add characters" style="margin-top:16px">
+      ${[['type', 'Type'], ['paste', 'Paste'], ['upload', 'Upload CSV']].map(([k, label]) => html`
+        <button class="tab" role="tab" aria-selected="${tab === k}" data-action="poolTab" data-tab="${k}">${label}</button>`)}
+    </div>
+    ${tab === 'type' ? html`<form data-form="poolAddOne" class="tab-body" novalidate>
+      <input type="text" data-field="poolName" value="${state.form.poolName}" maxlength="60" placeholder="Character name" aria-label="Character name">
+      <input type="text" data-field="poolImage" value="${state.form.poolImage}" placeholder="Image link (optional)" aria-label="Image link, optional" inputmode="url">
+      <button class="btn btn-small btn-primary" type="submit" ${busy}>Add character</button></form>` : ''}
+    ${tab === 'paste' ? html`<form data-form="poolAddPaste" class="tab-body" novalidate>
+      <textarea data-field="poolPaste" rows="6" aria-label="Paste characters" placeholder="${'One per line, with an optional image link:\nGojo Satoru, https://example.com/gojo.png\nYuji Itadori\nMegumi Fushiguro, Nobara Kugisaki'}">${state.form.poolPaste}</textarea>
+      <button class="btn btn-small btn-primary" type="submit" ${busy}>Add characters</button></form>` : ''}
+    ${tab === 'upload' ? html`<div class="tab-body">
+      <label class="btn btn-small btn-primary file-btn">Choose a CSV file
+        <input type="file" accept=".csv,.tsv,.txt,text/csv,text/plain" data-change="poolUpload" class="sr-only" ${busy}></label>
+      <p class="hint">One character per row, with an image link in any column if you have one. Header rows are fine. Adding a character that’s already here with a link fills in its missing image.</p></div>` : ''}
+    ${p.busy ? html`<p class="hint">Adding…</p>` : poolResultBox()}
+  </section>`;
+}
+
+function poolScreen() {
+  const p = state.pool;
+  const verse = p.verses.find((x) => x.id === p.verseId);
+  let main;
+  if (!p.loaded) main = html`<p class="why center">Loading…</p>`;
+  else if (!p.verses.length) main = html`<div class="panel notice"><p>${p.error || 'The pool is empty.'}</p></div>`;
+  else if (!verse) {
+    main = html`<div class="verse-grid">${p.verses.map((x) => html`
+      <button class="room-card" data-action="openVerse" data-id="${x.id}">
+        <div class="title">${x.name}</div>
+        <div class="meta"><span>${plural2(x.count, 'character')}</span>${x.withImages ? html`<span>${x.withImages} with images</span>` : ''}</div>
+      </button>`)}</div>`;
+  } else {
+    const q = state.form.poolSearch.trim().toLowerCase();
+    const shown = q ? p.characters.filter((c) => c.name.toLowerCase().includes(q)) : p.characters;
+    main = html`<section class="panel">
+      <div class="chars-head"><h3>${verse.name}</h3><span class="count">${verse.count}</span></div>
+      <button class="back" style="color:var(--muted)" data-action="allVerses">‹ All verses</button>
+      <input type="text" data-field="poolSearch" value="${state.form.poolSearch}" placeholder="Search ${verse.name}" aria-label="Search characters" autocomplete="off">
+      <div class="char-scroll" tabindex="0" aria-label="Characters in ${verse.name}">
+        <ul class="char-list">${shown.map((c) => html`<li><span>${c.name}</span>${c.image ? html`<span class="badge you" title="Has an image">Image</span>` : ''}</li>`)}</ul>
+        ${!shown.length ? html`<p class="hint empty">${p.characters.length ? `No characters match “${state.form.poolSearch}”.` : 'Loading…'}</p>` : ''}
+      </div>
+    </section>`;
+  }
+  return html`
+    ${back('home')}
+    <header class="screen-head"><h2>Community pool</h2><p>Characters shared by players, grouped by anime. Hosts can load any verse into their game.</p></header>
+    <div class="stack">
+      ${main}
+      ${p.loaded && p.verses.length ? poolAccessPanel() : ''}
+      ${poolAddPanel()}
+      <p class="why center"><a href="/contact" data-action="contactPage">Contact the admin</a></p>
+    </div>`;
+}
+
+function contactScreen() {
+  const f = state.form;
+  if (state.contactSent) {
+    return html`<div class="panel notice" style="margin-top:40px"><h2>Message sent</h2>
+      <p>The admin will pick it up${f.contactReply ? ` and can reply to ${f.contactReply}` : ''}.</p>
+      <button class="btn btn-primary" data-action="home">Back to home</button></div>`;
+  }
+  return html`
+    ${back('home')}
+    <header class="screen-head"><h2>Contact the admin</h2><p>Questions, problems, or a verse you’d like added.</p></header>
+    <form class="panel" data-form="contact" novalidate>
+      <label class="field"><span class="label">Your name <small>— optional</small></span>
+        <input type="text" data-field="contactName" value="${f.contactName}" maxlength="40"></label>
+      <label class="field"><span class="label">Email or username to reply to <small>— optional</small></span>
+        <input type="text" data-field="contactReply" value="${f.contactReply}" maxlength="120" autocomplete="email"></label>
+      <label class="field"><span class="label">Message</span>
+        <textarea data-field="contactMessage" rows="5" maxlength="2000" required>${f.contactMessage}</textarea></label>
+      ${state.error ? html`<p class="error-text" role="alert">${state.error}</p>` : ''}
+      <button class="btn btn-primary btn-block" type="submit" style="margin-top:18px" ${raw(state.busy ? 'disabled' : '')}>Send message</button>
+    </form>`;
+}
+
 function noticeScreen() {
   const n = state.notice || {};
   return html`
@@ -552,7 +847,7 @@ function importResultBox() {
       <p><strong>Added ${plural(r.added, 'character')}</strong>${r.fileName ? html` from ${r.fileName}` : ''}. You now have ${r.total}.</p>
       ${r.duplicates?.length ? html`
         <p class="dup-head">${plural(r.duplicates.length, 'duplicate')} removed:</p>
-        <ul class="dups">${r.duplicates.map((d) => html`<li class="dup">${d}</li>`)}</ul>` : ''}
+        <ul class="dups">${r.duplicates.slice(0, 12).map((d) => html`<li class="dup">${d}</li>`)}${r.duplicates.length > 12 ? html`<li class="hint">and ${r.duplicates.length - 12} more</li>` : ''}</ul>` : ''}
       ${extra.map((t) => html`<p class="hint">${t}</p>`)}
       <button class="btn btn-small" data-action="dismissResult">OK</button>
     </div>`;
@@ -596,8 +891,37 @@ function characterList(v) {
       : html`<div class="clear-row"><button class="btn btn-small btn-ghost" data-action="askClear">Clear list</button></div>`) : ''}`;
 }
 
+// Lobby: load whole verses from the community pool.
+const QUICK = ['Naruto', 'One Piece', 'Bleach', 'Dragon Ball', 'One Punch Man'];
+function lobbyPoolBody() {
+  const lp = state.lobbyPool;
+  if (lp.verses === null) {
+    if (!lp.fetching) {
+      lp.fetching = true;
+      api('/api/pool/verses').then((r) => { lp.fetching = false; lp.verses = r.ok ? r.verses : []; lp.error = r.ok ? '' : r.message; render(); });
+    }
+    return html`<p class="hint" style="margin-top:12px">Loading the community pool…</p>`;
+  }
+  if (lp.error) return html`<p class="error-text">${lp.error}</p>`;
+  const quick = QUICK.map((n) => lp.verses.find((x) => x.name === n)).filter(Boolean);
+  const pickedCount = lp.verses.filter((x) => lp.picked.includes(x.id)).reduce((a, x) => a + x.count, 0);
+  const busy = raw(lp.busy ? 'disabled' : '');
+  return html`<div class="tab-body">
+    ${quick.length ? html`<p class="label">Quick load</p>
+      <div class="quick">${quick.map((x) => html`<button class="btn btn-small" data-action="quickLoad" data-id="${x.id}" ${busy}>${x.name} <small>${x.count}</small></button>`)}</div>` : ''}
+    <p class="label" style="margin-top:6px">Or pick several</p>
+    <ul class="verse-picks">${lp.verses.map((x) => html`<li><label class="pick">
+      <input type="checkbox" data-change="togglePoolVerse" data-id="${x.id}" ${raw(lp.picked.includes(x.id) ? 'checked' : '')}>
+      <span>${x.name}</span><small>${x.count} characters${x.withImages ? `, ${x.withImages} with images` : ''}</small></label></li>`)}</ul>
+    <button class="btn btn-small btn-primary" data-action="loadPicked" ${raw(lp.picked.length && !lp.busy ? '' : 'disabled')}>Load ${lp.picked.length ? `${pickedCount} characters` : 'selected'}</button>
+    <p class="hint">Want to add to the pool? <a href="/pool" data-action="openPool">Open the community pool</a>.</p>
+  </div>`;
+}
+
 function charactersPanel(v) {
   const n = state.characters.list.length;
+  // Hosts start on the Community tab when the pool is available, until they pick another tab.
+  if (state.config.pool && !state.charTabChosen) state.charTab = 'pool';
   const tab = state.charTab;
   const busy = raw(state.importing ? 'disabled' : '');
   return html`
@@ -606,12 +930,14 @@ function charactersPanel(v) {
       ${poolStatus(v)}
       ${v.isHost ? html`
         <div class="add-box">
-          <label class="field"><span class="label">Anime <small>— optional, groups this list</small></span>
-            <input type="text" data-field="charVerse" value="${state.form.charVerse}" maxlength="40" placeholder="e.g. One Piece"></label>
-          <div class="tabs" role="tablist" aria-label="How to add characters">
+          <div class="tabs ${state.config.pool ? 'four' : ''}" role="tablist" aria-label="How to add characters">
+            ${state.config.pool ? html`<button class="tab" role="tab" aria-selected="${tab === 'pool'}" data-action="lobbyPoolTab">Community</button>` : ''}
             ${[['type', 'Type'], ['paste', 'Paste'], ['upload', 'Upload CSV']].map(([k, label]) => html`
               <button class="tab" role="tab" aria-selected="${tab === k}" data-action="charTab" data-tab="${k}">${label}</button>`)}
           </div>
+          ${tab === 'pool' ? lobbyPoolBody() : html`
+          <label class="field" style="margin-top:12px"><span class="label">Anime <small>— optional, groups this list</small></span>
+            <input type="text" data-field="charVerse" value="${state.form.charVerse}" maxlength="40" placeholder="e.g. One Piece"></label>`}
           ${tab === 'type' ? html`
             <form data-form="addOne" class="tab-body" novalidate>
               <input type="text" data-field="charName" value="${state.form.charName}" maxlength="60" placeholder="Character name" aria-label="Character name">
@@ -1202,6 +1528,8 @@ function render() {
     case 'name': body = nameScreen(); break;
     case 'waiting': body = waitingScreen(); break;
     case 'notice': body = noticeScreen(); break;
+    case 'pool': body = poolScreen(); break;
+    case 'contact': body = contactScreen(); break;
     case 'room': {
       const v = state.view;
       if (!v) body = html`<p>Loading…</p>`;

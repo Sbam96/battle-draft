@@ -321,6 +321,33 @@ export class Room {
     return { added: merged.added.length, duplicates: merged.duplicates, notes: parsed.notes, total: this.characters.length };
   }
 
+  // Loads verses from the community pool: groups = [{ verse, characters: [{ name, image }] }].
+  // All or nothing: if the total would pass 500, nothing is added.
+  addPoolCharacters(byId, groups) {
+    this.#requireHost(byId);
+    this.#requireLobby();
+    const staged = [...this.characters];
+    const added = [];
+    const duplicates = [];
+    const verses = [];
+    try {
+      for (const g of groups) {
+        const res = mergeCharacters(staged, g.characters, { verse: clean(g.verse).slice(0, 40) });
+        staged.push(...res.added);
+        added.push(...res.added);
+        duplicates.push(...res.duplicates);
+        verses.push({ verse: g.verse, added: res.added.length });
+      }
+    } catch (err) {
+      if (err.code === 'TOO_MANY') throw new GameError('TOO_MANY', `That would take the list past 500 characters (you have ${this.characters.length}). Load fewer verses, or remove some first.`);
+      throw err;
+    }
+    for (const c of added) this.characters.push({ id: shortId(), ...c });
+    this.charVersion += 1;
+    this.#touch();
+    return { added: added.length, duplicates, verses, total: this.characters.length };
+  }
+
   removeCharacter(byId, charId) {
     this.#requireHost(byId);
     this.#requireLobby();

@@ -10,11 +10,24 @@
   <link href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
   <style>
-    .reports { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
-    .reports li { border-left: 4px solid var(--pink); padding: 4px 0 4px 12px; }
-    .reports .meta { color: var(--muted); font-size: 0.88rem; }
-    .reports .reason { margin-top: 4px; font-weight: 700; overflow-wrap: anywhere; }
-    .admin-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 20px; }
+    #app { max-width: 760px; }
+    .admin-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+    .admin-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+    .admin-tabs .tab { flex: 0 1 auto; padding: 0 14px; }
+    .admin-tabs .tab .n { display: inline-block; min-width: 1.6em; margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--pink); color: #fff; font-size: 0.8rem; }
+    .admin-tabs .tab .n.zero { background: var(--paper-2); color: var(--muted); }
+    .items { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+    .items > li { border-left: 4px solid var(--gold); padding: 6px 0 6px 12px; display: grid; gap: 6px; }
+    .items > li.done { border-left-color: var(--paper-2); opacity: 0.65; }
+    .items .meta { color: var(--muted); font-size: 0.88rem; }
+    .items .body { font-weight: 700; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .items .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .imgs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .imgs figure { margin: 0; background: var(--paper-2); border-radius: 8px; padding: 8px; }
+    .imgs img { width: 100%; height: 150px; object-fit: contain; display: block; }
+    .imgs figcaption { font-size: 0.8rem; overflow-wrap: anywhere; margin-top: 6px; }
+    .stats { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); margin-bottom: 14px; font-weight: 700; }
+    .empty { color: var(--muted); }
   </style>
 </head>
 <body>
@@ -35,58 +48,160 @@
     </form>
 
     <section id="dash" hidden>
-      <div class="admin-head"><h2>Reports</h2><button class="btn btn-small btn-ghost" id="logout">Sign out</button></div>
-      <div class="panel">
-        <p class="hint" id="count"></p>
-        <ul class="reports" id="reports"></ul>
-        <p class="hint" style="margin-top:16px">Reports are kept while the server is running. Every report is also written to the service’s logs in Render (search for “[report]”), so nothing is lost when the server restarts.</p>
-      </div>
+      <div class="admin-head"><h2>Admin</h2><button class="btn btn-small btn-ghost" id="logout">Sign out</button></div>
+      <p class="error-text" id="pool-off" hidden>The community pool database isn’t connected. Add DATABASE_URL in Render. Reports below are only those since the last restart.</p>
+      <div class="admin-tabs" role="tablist" id="tabs"></div>
+      <div class="panel" id="panel"></div>
     </section>
   </main>
   <script>
     const $ = (id) => document.getElementById(id);
     const show = (id) => { for (const s of ['loading', 'off', 'login', 'dash']) $(s).hidden = s !== id; };
-    const fmtTime = (ms) => new Date(ms).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+    const when = (t) => new Date(t).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+    // Builds elements safely: every piece of text goes in as text, never as HTML.
+    function el(tag, props = {}, ...kids) {
+      const n = document.createElement(tag);
+      for (const [k, v] of Object.entries(props)) {
+        if (k === 'class') n.className = v;
+        else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
+        else if (v !== false && v != null) n.setAttribute(k, v === true ? '' : v);
+      }
+      for (const k of kids.flat()) if (k != null && k !== false) n.append(k instanceof Node ? k : document.createTextNode(String(k)));
+      return n;
+    }
+    const btn = (label, onclick, cls = 'btn btn-small') => el('button', { class: cls, type: 'button', onclick }, label);
+    const safeLink = (u) => (/^https?:\/\//i.test(u) ? el('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, u) : u);
+    const img = (u) => el('img', { src: /^https?:\/\//i.test(u || '') ? u : '', alt: '', referrerpolicy: 'no-referrer', loading: 'lazy' });
 
-    async function loadReports() {
-      const res = await fetch('/admin/api/reports');
-      if (res.status === 401) return show('login');
-      const { reports } = await res.json();
-      $('count').textContent = reports.length ? `${reports.length} report${reports.length === 1 ? '' : 's'}, newest first.` : 'No reports yet.';
-      const list = $('reports');
-      list.replaceChildren(...reports.map((r) => {
-        const li = document.createElement('li');
-        const meta = document.createElement('p'); meta.className = 'meta';
-        meta.textContent = `${fmtTime(r.at)}. ${r.reporter} reported ${r.target} in “${r.roomName}”.`;
-        const reason = document.createElement('p'); reason.className = 'reason';
-        reason.textContent = r.reason; // plain text only
-        li.append(meta, reason);
-        return li;
-      }));
+    let data = null;
+    let tab = 'requests';
+    let verse = null;
+
+    async function call(method, url, body) {
+      const r = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+      if (r.status === 401) { show('login'); throw new Error('signed out'); }
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { alert(j.message || 'That didn’t work. Try again.'); throw new Error(j.message); }
+      return j;
+    }
+    async function load() {
+      data = await call('GET', '/admin/api/overview');
+      $('pool-off').hidden = data.poolConnected;
+      render();
       show('dash');
     }
+
+    const TABS = [
+      ['requests', 'Access requests', () => data.requests?.length || 0],
+      ['images', 'Image clashes', () => data.images?.length || 0],
+      ['messages', 'Messages', () => (data.messages || []).filter((m) => !m.handled).length],
+      ['reports', 'Reports', () => (data.reports || []).filter((m) => !m.handled).length],
+      ['approved', 'Approved list', null],
+      ['pool', 'Pool', null],
+    ];
+
+    function render() {
+      const tabs = TABS.filter(([k]) => data.poolConnected || k === 'reports');
+      if (!tabs.some(([k]) => k === tab)) tab = tabs[0][0];
+      $('tabs').replaceChildren(...tabs.map(([k, label, count]) => {
+        const n = count ? count() : null;
+        return el('button', { class: 'tab', role: 'tab', 'aria-selected': String(tab === k), onclick: () => { tab = k; verse = null; render(); } },
+          label, n !== null ? el('span', { class: `n ${n ? '' : 'zero'}` }, n) : null);
+      }));
+      $('panel').replaceChildren(...VIEWS[tab]());
+    }
+
+    const empty = (t) => [el('p', { class: 'empty' }, t)];
+    const VIEWS = {
+      requests() {
+        if (!data.requests.length) return empty('No one is waiting. Requests to add characters appear here.');
+        return [el('ul', { class: 'items' }, data.requests.map((r) => el('li', {},
+          el('p', { class: 'body' }, r.identity),
+          el('p', { class: 'meta' }, `Asked ${when(r.created_at)}`),
+          r.note ? el('p', {}, `“${r.note}”`) : null,
+          el('div', { class: 'actions' },
+            btn('Approve', async () => { await call('POST', `/admin/api/access/${r.id}`, { approve: true }); load(); }, 'btn btn-small btn-primary'),
+            btn('Deny', async () => { await call('POST', `/admin/api/access/${r.id}`, { approve: false }); load(); }, 'btn btn-small btn-danger')),
+        )))];
+      },
+      images() {
+        if (!data.images.length) return empty('No image clashes. When someone suggests a different image for a character that already has one, it appears here.');
+        return [el('ul', { class: 'items' }, data.images.map((r) => el('li', {},
+          el('p', { class: 'body' }, `${r.name} (${r.verse})`),
+          el('p', { class: 'meta' }, `Suggested by ${r.requested_by || 'unknown'}, ${when(r.created_at)}`),
+          el('div', { class: 'imgs' },
+            el('figure', {}, img(r.image_url), el('figcaption', {}, 'Current: ', safeLink(r.image_url))),
+            el('figure', {}, img(r.proposed_url), el('figcaption', {}, 'Suggested: ', safeLink(r.proposed_url)))),
+          el('div', { class: 'actions' },
+            btn('Use the suggested image', async () => { await call('POST', `/admin/api/images/${r.id}`, { approve: true }); load(); }, 'btn btn-small btn-primary'),
+            btn('Keep the current one', async () => { await call('POST', `/admin/api/images/${r.id}`, { approve: false }); load(); })),
+        )))];
+      },
+      messages() {
+        if (!data.messages.length) return empty('No messages yet. The contact form sends them here.');
+        return [el('ul', { class: 'items' }, data.messages.map((m) => el('li', { class: m.handled ? 'done' : '' },
+          el('p', { class: 'meta' }, `${m.from_name || 'Someone'}${m.reply_to ? `, reply to ${m.reply_to}` : ''}, ${when(m.created_at)}`),
+          el('p', { class: 'body' }, m.body),
+          el('div', { class: 'actions' }, btn(m.handled ? 'Mark as not done' : 'Mark as done', async () => { await call('POST', '/admin/api/handled', { table: 'messages', id: m.id, handled: !m.handled }); load(); })),
+        )))];
+      },
+      reports() {
+        const list = data.reports || [];
+        if (!list.length) return empty('No reports. When a host reports a player, it appears here.');
+        return [el('ul', { class: 'items' }, list.map((r) => el('li', { class: r.handled ? 'done' : '' },
+          el('p', { class: 'meta' }, `${when(r.created_at || r.at)}. ${r.reporter} reported ${r.target} in “${r.room_name || r.roomName}”.`),
+          el('p', { class: 'body' }, r.reason),
+          data.poolConnected ? el('div', { class: 'actions' }, btn(r.handled ? 'Mark as not done' : 'Mark as done', async () => { await call('POST', '/admin/api/handled', { table: 'reports', id: r.id, handled: !r.handled }); load(); })) : null,
+        )))];
+      },
+      approved() {
+        const input = el('input', { type: 'text', placeholder: 'Username or email', 'aria-label': 'Username or email to approve', maxlength: '80' });
+        const add = el('form', { class: 'invite', onsubmit: async (e) => { e.preventDefault(); await call('POST', '/admin/api/contributors', { identity: input.value }); input.value = ''; load(); } },
+          input, el('button', { class: 'btn btn-small btn-primary', type: 'submit' }, 'Approve'));
+        return [
+          el('p', { class: 'hint' }, 'People on this list can add characters to the community pool. Approving a request adds them here. You can also add someone directly.'),
+          el('div', { style: 'margin:12px 0 18px' }, add),
+          data.contributors.length
+            ? el('ul', { class: 'list' }, data.contributors.map((c) => el('li', {},
+              el('span', { class: 'grow' }, c.identity, el('br'), el('small', { class: 'hint' }, `Approved ${when(c.approved_at)}`)),
+              btn('Remove', async () => { if (confirm(`Remove ${c.identity} from the approved list?`)) { await call('DELETE', `/admin/api/contributors/${c.id}`); load(); } }, 'btn btn-small btn-danger'))))
+            : el('p', { class: 'empty' }, 'No one is approved yet.'),
+        ];
+      },
+      pool() {
+        const c = data.counts;
+        const stats = el('p', { class: 'stats' }, `${c.verses} verses`, ' · ', `${c.characters} characters`, ' · ', `${c.with_images} with images`);
+        if (!verse) {
+          const list = el('ul', { class: 'list' }, el('li', {}, 'Loading…'));
+          call('GET', '/admin/api/pool/verses').then(({ verses }) => list.replaceChildren(...verses.map((v) => el('li', {},
+            el('span', { class: 'grow' }, v.name), el('span', { class: 'hint' }, `${v.count}`), btn('Open', () => { verse = v; render(); })))));
+          return [stats, list];
+        }
+        const list = el('ul', { class: 'list' }, el('li', {}, 'Loading…'));
+        const refresh = () => call('GET', `/admin/api/pool/verses/${verse.id}`).then(({ characters }) => list.replaceChildren(...characters.map((ch) => el('li', {},
+          el('span', { class: 'grow' }, ch.name, ch.image ? el('small', { class: 'hint' }, ' · ', safeLink(ch.image)) : null),
+          btn('Remove', async () => { if (confirm(`Remove ${ch.name} from ${verse.name}?`)) { await call('DELETE', `/admin/api/pool/characters/${ch.id}`); refresh(); } }, 'btn btn-small btn-danger')))));
+        refresh();
+        return [stats, btn('‹ All verses', () => { verse = null; render(); }, 'back'), el('h3', {}, verse.name), list];
+      },
+    };
 
     async function init() {
       const me = await fetch('/admin/api/me').then((r) => r.json()).catch(() => ({}));
       if (!me.setup) return show('off');
-      if (me.loggedIn) return loadReports();
+      if (me.loggedIn) return load();
       show('login');
       $('username').focus();
     }
-
     $('login').addEventListener('submit', async (e) => {
       e.preventDefault();
       $('login-error').hidden = true;
-      const res = await fetch('/admin/api/login', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: $('username').value, password: $('password').value }),
-      });
-      if (res.ok) { $('password').value = ''; return loadReports(); }
+      const res = await fetch('/admin/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('username').value, password: $('password').value }) });
+      if (res.ok) { $('password').value = ''; return load(); }
       const { message } = await res.json().catch(() => ({ message: 'Sign-in failed. Try again.' }));
       $('login-error').textContent = message;
       $('login-error').hidden = false;
     });
-
     $('logout').addEventListener('click', async () => { await fetch('/admin/api/logout', { method: 'POST' }); show('login'); });
     init();
   </script>

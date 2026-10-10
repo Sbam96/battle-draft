@@ -420,6 +420,33 @@ ol.role-list li { display: grid; grid-template-columns: 2.2rem 1fr; gap: 8px; al
   to { transform: translate(var(--drift), 110vh) rotate(var(--spin)); }
 }
 
+/* Inside light panels: light form controls and readable links. */
+.panel { color-scheme: light; }
+.panel a { color: var(--ink); text-decoration-thickness: 2px; text-underline-offset: 2px; }
+.panel a:hover { color: var(--pink); }
+
+/* ---------- community pool ---------- */
+.tabs.four { grid-template-columns: repeat(4, 1fr); }
+.tabs.four .tab { font-size: 0.84rem; padding: 0 4px; }
+.quick { display: flex; flex-wrap: wrap; gap: 8px; }
+.quick small { font-family: var(--body); font-weight: 500; color: var(--muted); }
+.verse-picks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 260px; overflow-y: auto; }
+.pick { display: grid; grid-template-columns: auto 1fr; column-gap: 10px; align-items: center; padding: 8px 10px; background: #fff; border: 2px solid var(--line); border-radius: 8px; cursor: pointer; }
+.pick input { width: 20px; height: 20px; grid-row: span 2; accent-color: var(--ink); }
+.pick span { font-weight: 700; }
+.pick small { color: var(--muted); grid-column: 2; }
+.pick:has(input:checked) { background: var(--gold); }
+.verse-grid { display: grid; gap: 14px; }
+.verse-grid .room-card + .room-card { margin-top: 0; }
+.signed { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+select {
+  width: 100%; min-height: 48px; padding: 10px 12px; font: 500 1rem var(--body); color: var(--ink);
+  background: #fff; border: 2px solid var(--line); border-radius: 8px;
+}
+select:focus-visible { outline: 3px solid var(--pink); outline-offset: 1px; }
+.hero-foot a { color: var(--gold); }
+@media (min-width: 720px) { .verse-grid { grid-template-columns: 1fr 1fr; } }
+
 .notice { text-align: center; }
 .notice p { margin: 10px 0 20px; }
 .waiting-dots { font-family: var(--display); font-size: 2rem; color: var(--gold); letter-spacing: 0.2em; }

@@ -7,6 +7,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { Room, GameError } from './room.js';
 import { mountAdmin } from './admin.js';
+import { mountPool } from './poolRoutes.js';
+import { PoolStore, PoolError } from './pool.js';
+import { openDb } from './db.js';
 import { roomId } from './ids.js';
 import { GRACE_MS, EMPTY_ROOM_TTL_MS, maxPlayersFor, PLACEMENT_TIMER_OPTIONS } from './config.js';
 
@@ -16,7 +19,10 @@ export function createApp({
   graceMs = GRACE_MS,
   emptyRoomTtlMs = EMPTY_ROOM_TTL_MS,
   admin = { username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD },
+  db = null, // an open database for the community pool, or null to run without it
 } = {}) {
+  const poolRef = { store: db ? new PoolStore(db) : null };
+  const pool = () => poolRef.store;
   const app = express();
   const http = createServer(app);
   const io = new Server(http, { cors: { origin: false }, maxHttpBufferSize: 2e6 });
@@ -35,11 +41,13 @@ export function createApp({
     next();
   });
   app.use(express.static(PUBLIC_DIR, { index: 'index.html' }));
-  app.get('/config', (req, res) => res.json({ maxPlayers: { 5: maxPlayersFor(5), 10: maxPlayersFor(10) }, timerOptions: PLACEMENT_TIMER_OPTIONS }));
+  app.get('/config', (req, res) => res.json({ maxPlayers: { 5: maxPlayersFor(5), 10: maxPlayersFor(10) }, timerOptions: PLACEMENT_TIMER_OPTIONS, pool: Boolean(pool()) }));
+  mountPool(app, { pool });
   app.get('/health', (req, res) => res.json({ ok: true, rooms: rooms.size }));
   app.get('/r/:id', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html')));
   app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
-  mountAdmin(app, { credentials: admin, reports });
+  app.get(['/pool', '/contact'], (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html')));
+  mountAdmin(app, { credentials: admin, reports, pool });
 
   // ---------- helpers ----------
   const publicList = () => [...rooms.values()]
@@ -121,6 +129,18 @@ export function createApp({
       } catch (err) {
         if (err instanceof GameError) ack({ ok: false, code: err.code, message: err.message });
         else { console.error(err); ack({ ok: false, code: 'SERVER', message: 'Something went wrong on our side. Try again.' }); }
+      }
+    });
+
+    // Like on(), for handlers that wait on the database.
+    const onAsync = (event, fn) => socket.on(event, async (payload = {}, ack = () => {}) => {
+      if (typeof ack !== 'function') ack = () => {};
+      if (!allow()) return ack({ ok: false, code: 'SLOW_DOWN', message: 'Too many actions at once. Wait a moment.' });
+      try {
+        ack({ ok: true, ...((await fn(payload || {})) ?? {}) });
+      } catch (err) {
+        if (err instanceof GameError || err instanceof PoolError) ack({ ok: false, code: err.code, message: err.message });
+        else { console.error(err); ack({ ok: false, code: 'SERVER', message: 'Couldn’t reach the community pool. Try again in a moment.' }); }
       }
     });
 
@@ -214,6 +234,7 @@ export function createApp({
       reports.push(report);
       if (reports.length > 1000) reports.shift();
       console.log(`[report] ${JSON.stringify(report)}`); // also kept in Render's logs, which survive restarts
+      pool()?.saveReport(report).catch((err) => console.error('[report] not saved to the database', err.message));
     });
 
     on('leave', () => {
@@ -228,6 +249,18 @@ export function createApp({
     });
 
     on('getCharacters', () => currentRoom().charactersPayload());
+
+    // Host loads whole verses from the community pool into the room's character list.
+    onAsync('loadPool', async ({ verseIds }) => {
+      const room = currentRoom();
+      if (!pool()) throw new GameError('POOL_OFF', 'The community pool isn’t set up yet.');
+      if (room.hostId !== socket.data.playerId) throw new GameError('NOT_HOST', 'Only the host can do that.');
+      const groups = await pool().charactersForVerses(Array.isArray(verseIds) ? verseIds.slice(0, 50) : []);
+      const result = room.addPoolCharacters(socket.data.playerId, groups);
+      sendCharacters(room);
+      broadcast(room);
+      return result;
+    });
 
     on('addCharacters', ({ text, source, verse }) => {
       const room = currentRoom();
@@ -319,12 +352,27 @@ export function createApp({
     });
   });
 
-  return { app, http, io, rooms, reports };
+  return { app, http, io, rooms, reports, attachDb: (d) => { poolRef.store = d ? new PoolStore(d) : null; } };
 }
 
 // Run directly: `node src/server.js`
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const { http } = createApp();
+  // The game starts straight away; the pool joins once the database answers (Neon may be waking up).
+  const app = createApp();
   const port = Number(process.env.PORT) || 3000;
-  http.listen(port, () => console.log(`Battle Draft listening on http://localhost:${port}`));
+  app.http.listen(port, () => console.log(`Battle Draft listening on http://localhost:${port}`));
+  const url = process.env.DATABASE_URL;
+  if (!url) console.log('[pool] DATABASE_URL not set: community pool switched off');
+  else {
+    const connect = async (attempt = 1) => {
+      try {
+        app.attachDb(await openDb(url));
+        console.log('[pool] database connected');
+      } catch (err) {
+        console.error(`[pool] database connection failed (attempt ${attempt}): ${err.message}`);
+        setTimeout(() => connect(attempt + 1), Math.min(60_000, attempt * 5000)).unref();
+      }
+    };
+    connect();
+  }
 }
