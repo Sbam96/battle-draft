@@ -63,6 +63,9 @@ export function databaseUrl(env = process.env, dir = '/etc/secrets') {
   return null;
 }
 
+// Identifies this version of the code. Render sets RENDER_GIT_COMMIT on every deploy.
+export const BUILD = (process.env.RENDER_GIT_COMMIT || '').slice(0, 12) || Date.now().toString(36);
+
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 
 export function createApp({
@@ -90,13 +93,18 @@ export function createApp({
     res.setHeader('Referrer-Policy', 'no-referrer');
     next();
   });
-  app.use(express.static(PUBLIC_DIR, { index: 'index.html' }));
+  // Pages are stamped with the build so a new deploy always loads new code.
+  const indexHtml = readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8')
+    .replace('<head>', `<head>\n  <meta name="bd-build" content="${BUILD}">`)
+    .replace('/styles.css"', `/styles.css?v=${BUILD}"`)
+    .replace('/app.js"', `/app.js?v=${BUILD}"`);
+  const sendIndex = (req, res) => { res.setHeader('Cache-Control', 'no-cache'); res.type('html').send(indexHtml); };
+  app.get(['/', '/index.html', '/r/:id', '/pool', '/contact'], sendIndex);
+  app.use(express.static(PUBLIC_DIR, { index: false, setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
   app.get('/config', (req, res) => res.json({ maxPlayers: { 5: maxPlayersFor(5), 10: maxPlayersFor(10) }, timerOptions: PLACEMENT_TIMER_OPTIONS, pool: Boolean(pool()) }));
   mountPool(app, { pool });
   app.get('/health', (req, res) => res.json({ ok: true, rooms: rooms.size }));
-  app.get('/r/:id', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html')));
   app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
-  app.get(['/pool', '/contact'], (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html')));
   mountAdmin(app, { credentials: admin, reports, pool });
 
   // ---------- helpers ----------
@@ -167,6 +175,7 @@ export function createApp({
 
   // ---------- sockets ----------
   io.on('connection', (socket) => {
+    socket.emit('hello', { build: BUILD });
     const allow = limiter(socket);
 
     // Wraps a handler: rate limit, error reporting, and an acknowledgement callback.

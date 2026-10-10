@@ -122,6 +122,7 @@ function go(screen, extra = {}) {
 }
 
 function notice(title, message) {
+  keepAwake(false);
   state.view = null; state.roomId = null; state.characters = { version: -1, list: [] };
   setPath('/');
   go('notice', { notice: { title, message } });
@@ -160,6 +161,7 @@ async function enterRoom(name) {
 
 // ---------- socket events ----------
 socket.on('room', (view) => {
+  keepAwake(true);
   if (view.draft) state.clockOffset = view.draft.serverNow - Date.now();
   if (view.draft?.turn?.stage === 'landed' || view.draft?.turn?.stage === 'spin') state.keepChoice = 'new';
   state.view = view;
@@ -169,6 +171,45 @@ socket.on('room', (view) => {
   if (state.reportFor && !view.players.some((p) => p.id === state.reportFor)) state.reportFor = null;
   render();
 });
+// ---------- keeping the screen awake while in a room ----------
+// Stops phones dimming and locking mid-game, which was the main cause of disconnects.
+// Phones drop the lock when you switch apps, so it's re-applied whenever the game is visible again.
+const wake = { lock: null, wanted: false, pending: false };
+async function requestWake() {
+  if (!wake.wanted || wake.lock || wake.pending || document.visibilityState !== 'visible' || !('wakeLock' in navigator)) return;
+  wake.pending = true;
+  try {
+    wake.lock = await navigator.wakeLock.request('screen');
+    wake.lock.addEventListener('release', () => { wake.lock = null; });
+  } catch { /* not allowed right now (e.g. low battery mode); tried again on the next tap */ }
+  wake.pending = false;
+}
+function keepAwake(on) {
+  if (on === wake.wanted) { if (on) requestWake(); return; }
+  wake.wanted = on;
+  if (on) requestWake();
+  else if (wake.lock) { wake.lock.release().catch(() => {}); wake.lock = null; }
+}
+document.addEventListener('visibilitychange', requestWake);
+document.addEventListener('pointerdown', requestWake, true); // some browsers only allow it after a tap
+
+// ---------- staying up to date ----------
+const MY_BUILD = document.querySelector('meta[name="bd-build"]')?.content || '';
+socket.on('hello', ({ build }) => {
+  if (!MY_BUILD || !build || build === MY_BUILD) return;
+  const midGame = state.screen === 'room' && state.view && !['lobby', 'finished'].includes(state.view.phase);
+  // Reload by itself at most once a minute (old and new servers overlap briefly during a deploy).
+  let last = 0;
+  try { last = Number(sessionStorage.getItem('bd-reloaded')) || 0; } catch { /* ignore */ }
+  if (!midGame && Date.now() - last > 60_000) {
+    try { sessionStorage.setItem('bd-reloaded', String(Date.now())); } catch { /* ignore */ }
+    location.reload(); // safe: you rejoin as yourself
+    return;
+  }
+  state.newVersion = true;
+  render();
+});
+
 socket.on('characters', (payload) => {
   state.characters = { ...payload }; // a new object each time, so the name lookup always rebuilds
   if (state.screen === 'room') render();
@@ -243,6 +284,7 @@ async function importText(text, source, fileName) {
 
 const actions = {
   home: () => { setPath('/'); go('home'); },
+  reloadPage: () => location.reload(), // you rejoin the game as yourself
   contactPage() { setPath('/contact'); go('contact', { contactSent: false }); },
   // ---- community pool ----
   async openPool() {
@@ -425,6 +467,7 @@ const actions = {
     await importText(await file.text(), 'csv', file.name);
   },
   async leave() {
+    keepAwake(false);
     await emit('leave');
     state.view = null; state.roomId = null; state.characters = { version: -1, list: [] };
     setPath('/'); go('home');
@@ -1042,10 +1085,13 @@ function missingCharacter() {
   state.lastCharRefetch = now;
   emit('getCharacters').then((r) => { if (r.ok && r.list) { state.characters = { version: r.version, list: r.list }; render(); } });
 }
+// Name lookup: the full list first, then the names the server sends with every update.
 const charName = (id) => {
   const c = charById().get(id);
-  if (!c && id != null) missingCharacter();
-  return c?.name ?? 'Loading…';
+  if (c) return c.name;
+  if (id == null) return '';
+  missingCharacter();
+  return state.view?.charNames?.[id] ?? 'Loading…';
 };
 const pName = (v, id) => v.names?.[id] ?? 'A player';
 
@@ -1069,7 +1115,7 @@ function charCard(id, label, { selectable = false, choice = '', selected = false
   const inner = html`
     ${label ? html`<span class="card-label">${label}</span>` : ''}
     ${showImg ? html`<img src="${c.image}" alt="" referrerpolicy="no-referrer">` : ''}
-    <span class="card-name">${c?.name ?? 'Unknown'}</span>
+    <span class="card-name">${charName(id)}</span>
     ${c?.verse ? html`<span class="card-verse">${c.verse}</span>` : ''}`;
   return selectable
     ? html`<button class="char-card selectable ${selected ? 'selected' : ''}" data-action="pickKeep" data-choice="${choice}" aria-pressed="${selected}">${inner}</button>`
@@ -1492,7 +1538,17 @@ function syncWheel(v) {
   if (w.el.parentNode !== slot) slot.appendChild(w.el);
   const d = v.draft;
   charById();
-  const names = state.charNameMap; // rebuilt per list, so the wheel redraws its labels when it changes
+  let names = state.charNameMap; // rebuilt per list, so the wheel redraws its labels when it changes
+  // If this page's list is missing anyone the server named, fill them in (keeps the ticker right).
+  const extra = Object.entries(v.charNames || {}).filter(([id]) => !names.has(id));
+  if (extra.length) {
+    const key = extra.map(([id]) => id).join();
+    if (state.mergedNamesKey !== key || state.mergedNamesBase !== names) {
+      state.mergedNames = new Map([...names, ...extra]);
+      state.mergedNamesKey = key; state.mergedNamesBase = names;
+    }
+    names = state.mergedNames;
+  }
   let spin = null;
   let held = null;
   if (v.phase === 'draft') {
@@ -1517,6 +1573,10 @@ function syncWheel(v) {
 }
 
 function offlineBar() {
+  if (state.newVersion && socket.connected) {
+    return html`<div class="panel update-bar" role="status"><span>A new version of Battle Draft is ready.</span>
+      <button class="btn btn-small btn-primary" data-action="reloadPage">Refresh</button></div>`;
+  }
   return socket.connected ? '' : html`<div class="panel" role="alert" style="margin-bottom:16px;background:var(--pink);color:#fff;text-align:center;padding:10px">Connection lost. Reconnecting…</div>`;
 }
 
@@ -1548,7 +1608,7 @@ function render() {
   const sel = active && 'selectionStart' in active ? [active.selectionStart, active.selectionEnd] : null;
   const wheelPhase = state.screen === 'room' && ['draft', 'endphase'].includes(state.view?.phase);
   $app.classList.toggle('wide', wheelPhase);
-  $app.innerHTML = fmt(html`${state.screen === 'room' ? offlineBar() : ''}${body}`);
+  $app.innerHTML = fmt(html`${state.screen === 'room' || state.newVersion ? offlineBar() : ''}${body}`);
   if (wheelPhase) syncWheel(state.view);
   tickCountdown();
   if (key) {

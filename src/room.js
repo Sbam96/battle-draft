@@ -551,12 +551,33 @@ export class Room {
       poolNeeded: minimumPool(Math.max(this.connectedPlayers.length, MIN_PLAYERS), this.settings.roleCount),
       poolForCap: minimumPool(this.settings.cap, this.settings.roleCount),
       draft: this.draft ? this.draft.view(Date.now()) : null,
+      charNames: this.#referencedNames(),
       end: this.endPhase ? this.endPhase.view() : null,
       faceoff: this.faceoff ? this.faceoff.view(playerId) : null,
       game: this.games || 1,
       names: { ...(this.nameCache || {}), ...Object.fromEntries(this.players.map((p) => [p.id, p.name])) },
       kickVotes: this.phase === 'lobby' ? {} : Object.fromEntries(this.players.map((p) => [p.id, this.kickTally(p.id)]).filter(([, t]) => t.votes > 0)),
     };
+  }
+
+  // Names for every character the screens might show right now (landed, held, teams, bin, feed,
+  // face-off), so a player's view never depends on their own copy of the full list.
+  #referencedNames() {
+    if (!this.draft) return {};
+    const byId = new Map(this.characters.map((c) => [c.id, c.name]));
+    const ids = new Set();
+    const add = (id) => { if (id != null) ids.add(id); };
+    const d = this.draft;
+    const t = d.turn;
+    if (t) { add(t.landed); add(t.held); add(t.spin?.landed); }
+    for (const team of d.teams.values()) team.forEach(add);
+    d.binned.forEach(add);
+    for (const e of d.log) { add(e.charId); add(e.released); add(e.replaced); add(e.returned); }
+    if (this.endPhase?.go) { add(this.endPhase.go.landed); add(this.endPhase.go.spin?.landed); }
+    if (this.faceoff) for (const team of this.faceoff.teams.values()) team.forEach(add);
+    const out = {};
+    for (const id of ids) if (byId.has(id)) out[id] = byId.get(id);
+    return out;
   }
 
   publicSummary() {

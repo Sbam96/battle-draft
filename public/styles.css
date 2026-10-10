@@ -425,6 +425,8 @@ ol.role-list li { display: grid; grid-template-columns: 2.2rem 1fr; gap: 8px; al
 .panel a { color: var(--ink); text-decoration-thickness: 2px; text-underline-offset: 2px; }
 .panel a:hover { color: var(--pink); }
 
+.update-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; padding: 12px 16px; background: var(--gold); }
+
 /* ---------- community pool ---------- */
 .tabs.four { grid-template-columns: repeat(4, 1fr); }
 .tabs.four .tab { font-size: 0.84rem; padding: 0 4px; }

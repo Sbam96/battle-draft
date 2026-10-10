@@ -129,3 +129,25 @@ test('BUG 2: the only possible judge drops mid-decision: the match pauses, then 
   assert.equal(r.faceoff.match.judge.id, lone);
   assert.equal(Boolean(r.faceoff.match.paused), false);
 });
+
+// ---------- 10 Oct play-test: names shown as "Unknown" on a page without the character list ----------
+test('BUG 3: every view carries names for the characters on screen (landed, teams, feed, bin)', () => {
+  const r = new Room({ id: 'r', hostName: 'Host', hostToken: 'th', settings: { roomName: 'R', visibility: 'private', roleCount: 5, roles: ['A', 'B', 'C', 'D', 'E'], cap: 8, turnOrder: 'join' } });
+  r.join('t2', 'P2'); r.join('t3', 'P3');
+  r.addCharacters(r.hostId, { text: names.join('\n') });
+  r.start(r.hostId, Math.random, T0);
+  const host = r.hostId;
+  r.draftAction(host, 'spin', {}, T0);
+  const binned = r.draft.turn.landed;
+  r.draftAction(host, 'bin', {}, T0);
+  r.draftAction(host, 'spin', {}, T0);
+  const landed = r.draft.turn.landed;
+  const nameOf = (id) => r.characters.find((c) => c.id === id).name;
+  let v = r.viewFor(r.players[1].id);
+  assert.equal(v.charNames[landed], nameOf(landed), 'the landed character');
+  assert.equal(v.charNames[binned], nameOf(binned), 'the binned character in the feed');
+  r.draftAction(host, 'place', { role: 0 }, T0);
+  v = r.viewFor(r.players[2].id);
+  assert.equal(v.charNames[r.draft.teams.get(host)[0]], nameOf(landed), 'team members');
+  assert.ok(Object.keys(v.charNames).length < 10, 'only what is on screen, not the whole list');
+});
