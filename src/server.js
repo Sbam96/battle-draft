@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { Room, GameError } from './room.js';
 import { mountAdmin } from './admin.js';
 import { mountPool } from './poolRoutes.js';
@@ -18,13 +18,21 @@ import { GRACE_MS, EMPTY_ROOM_TTL_MS, maxPlayersFor, PLACEMENT_TIMER_OPTIONS } f
 // (Render puts secret files in /etc/secrets). Any secret file holding a postgres:// address works.
 export function databaseUrl(env = process.env, dir = '/etc/secrets') {
   if (env.DATABASE_URL) return env.DATABASE_URL.trim();
-  try {
-    for (const name of readdirSync(dir)) {
-      const text = readFileSync(path.join(dir, name), 'utf8').trim();
-      const m = text.match(/(?:DATABASE_URL\s*=\s*)?["']?(postgres(?:ql)?:\/\/[^\s"']+)/);
-      if (m) { console.log(`[pool] using the database address from the secret file "${name}"`); return m[1]; }
-    }
-  } catch { /* no secret files */ }
+  let names = [];
+  try { names = readdirSync(dir); } catch { return null; } // no secret files
+  // Look at a file called DATABASE_URL first; skip Render's hidden folders and anything unreadable.
+  names.sort((a, b) => (b === 'DATABASE_URL') - (a === 'DATABASE_URL'));
+  for (const name of names) {
+    if (name.startsWith('..')) continue;
+    let text;
+    try {
+      if (!statSync(path.join(dir, name)).isFile()) continue;
+      text = readFileSync(path.join(dir, name), 'utf8');
+    } catch { continue; }
+    const m = text.match(/(postgres(?:ql)?:\/\/[^\s"']+)/);
+    if (m) { console.log(`[pool] using the database address from the secret file "${name}"`); return m[1]; }
+    if (name === 'DATABASE_URL') console.log('[pool] the secret file "DATABASE_URL" doesn’t contain a postgresql:// address');
+  }
   return null;
 }
 
