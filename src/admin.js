@@ -92,7 +92,7 @@ export function mountAdmin(app, { credentials, reports, pool = () => null, now =
   router.post('/api/handled', guard, needPool, wrap(async (req, res) => { await pool().setHandled(req.body?.table, req.body?.id, req.body?.handled !== false); res.json({ ok: true }); }));
   router.delete('/api/pool/characters/:id', guard, needPool, wrap(async (req, res) => { await pool().deleteCharacter(req.params.id); res.json({ ok: true }); }));
   router.get('/api/pool/verses', guard, needPool, wrap(async (req, res) => res.json({ verses: await pool().listVerses() })));
-  router.get('/api/pool/verses/:id', guard, needPool, wrap(async (req, res) => res.json({ characters: await pool().verseCharacters(req.params.id) })));
+  router.get('/api/pool/verses/:id', guard, needPool, wrap(async (req, res) => res.json({ characters: await pool().verseCharacters(req.params.id), duplicates: await pool().verseDuplicates(req.params.id) })));
 
   app.use('/admin', router);
 }

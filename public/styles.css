@@ -482,3 +482,7 @@ select:focus-visible { outline: 3px solid var(--pink); outline-offset: 1px; }
 .end-progress li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .end-status { font-size: 0.8rem; font-weight: 700; border: 2px solid var(--gold-deep); border-radius: 999px; padding: 0 10px; }
 .end-status.done { border-color: var(--teal); color: var(--teal); }
+
+/* Saved room settings (create screen) */
+.saved-settings { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.saved-settings .hint { flex-basis: 100%; margin: 0; }

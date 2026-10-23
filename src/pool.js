@@ -7,6 +7,7 @@
 //  - Image links only (no uploads). Bulk add by paste or CSV/table.
 
 import { nameKey } from './db.js';
+import { identityKey, possibleDuplicates } from './aliases.js';
 import { parseText, CHAR_NAME_MAX } from './characters.js';
 import { isProfane } from './profanity.js';
 import { MAX_CHARACTERS } from './config.js';
@@ -49,6 +50,11 @@ export class PoolStore {
       FROM verses v LEFT JOIN pool_characters c ON c.verse_id = v.id
       GROUP BY v.id ORDER BY count(c.id) DESC, v.name`);
     return rows.map((r) => ({ id: r.id, name: r.name, count: r.count, withImages: r.with_images }));
+  }
+
+  // Admin: groups in a verse that may be the same character under different names, for review.
+  async verseDuplicates(verseId) {
+    return possibleDuplicates(await this.verseCharacters(verseId));
   }
 
   async verseCharacters(verseId) {
@@ -123,18 +129,25 @@ export class PoolStore {
     return this.db.tx(async (client) => {
       const verse = await this.#findOrCreateVerse(client, { verseId, verseName }, identity);
       const result = { verse: { id: verse.id, name: verse.name }, added: [], imagesAdded: [], imageRequests: [], duplicates: [], notes: parsed.notes };
+      // Everything already in the verse, keyed so the same character under another name is caught
+      // ("Shiliew" when "Shiryu" is there). Loaded once: a verse is at most a few hundred rows.
+      const { rows: current } = await client.query('SELECT id, name, image_url FROM pool_characters WHERE verse_id = $1 ORDER BY id', [verse.id]);
+      const inVerse = new Map();
+      for (const r of current) { const ik = identityKey(r.name); if (!inVerse.has(ik)) inVerse.set(ik, r); }
       const seen = new Set();
       for (const e of parsed.entries) {
         const k = nameKey(e.name);
-        if (seen.has(k)) { result.duplicates.push(e.name); continue; }
-        seen.add(k);
-        const { rows } = await client.query(
-          'SELECT id, name, image_url FROM pool_characters WHERE verse_id = $1 AND name_key = $2', [verse.id, k]);
-        const existing = rows[0];
+        const ik = identityKey(e.name);
+        if (seen.has(ik)) { result.duplicates.push(e.name); continue; }
+        seen.add(ik);
+        const existing = inVerse.get(ik);
         if (!existing) {
-          await client.query(
-            'INSERT INTO pool_characters (verse_id, name, name_key, image_url, added_by) VALUES ($1, $2, $3, $4, $5)',
+          const { rows: ins } = await client.query(
+            `INSERT INTO pool_characters (verse_id, name, name_key, image_url, added_by) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT DO NOTHING RETURNING id`,
             [verse.id, e.name, k, e.image || null, identity]);
+          if (!ins.length) { result.duplicates.push(e.name); continue; }
+          inVerse.set(ik, { id: ins[0].id, name: e.name, image_url: e.image || null });
           result.added.push(e.name);
         } else if (e.image && !existing.image_url) {
           await client.query('UPDATE pool_characters SET image_url = $1 WHERE id = $2', [e.image, existing.id]);

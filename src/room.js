@@ -3,7 +3,7 @@
 
 import {
   ROLE_COUNTS, MIN_PLAYERS, NAME_MAX, ROLE_NAME_MAX, ROOM_NAME_MAX,
-  PLACEMENT_TIMER_OPTIONS, maxPlayersFor, minimumPool,
+  PLACEMENT_TIMER_OPTIONS, VOTE_TIMER_OPTIONS, maxPlayersFor, minimumPool,
 } from './config.js';
 import { parseText, mergeCharacters } from './characters.js';
 import { Draft, DraftError } from './draft.js';
@@ -62,8 +62,15 @@ export function validateSettings(input = {}) {
   if (timerEnabled && !PLACEMENT_TIMER_OPTIONS.includes(timerSeconds)) {
     throw new GameError('TIMER', 'Pick a placement timer from the list.');
   }
+  // Face-off voting timer (23 Oct 2026): off by default, like the placement timer. When off, voting
+  // waits until everyone has voted (or the host closes it).
+  const voteTimerEnabled = Boolean(input.voteTimerEnabled);
+  const voteTimerSeconds = Number(input.voteTimerSeconds) || 60;
+  if (voteTimerEnabled && !VOTE_TIMER_OPTIONS.includes(voteTimerSeconds)) {
+    throw new GameError('VOTE_TIMER', 'Pick a voting timer from the list.');
+  }
 
-  return { roomName, visibility, roleCount, roles, cap, turnOrder, releasedHoldToBin, timerEnabled, timerSeconds };
+  return { roomName, visibility, roleCount, roles, cap, turnOrder, releasedHoldToBin, timerEnabled, timerSeconds, voteTimerEnabled, voteTimerSeconds };
 }
 
 export class Room {
@@ -443,6 +450,7 @@ export class Room {
         order: this.draft.order.filter((id) => this.player(id)),
         teams: this.draft.teams,
         roleCount: this.settings.roleCount,
+        voteSeconds: this.settings.voteTimerEnabled ? this.settings.voteTimerSeconds : 0,
         ctx: { players: () => this.players.map((p) => ({ id: p.id, connected: p.connected })), hostId: () => this.hostId },
         ...(this.random ? { random: this.random } : {}),
       });
@@ -496,6 +504,7 @@ export class Room {
         case 'vote': f.vote(playerId, payload.picks, now); break;
         case 'judge': f.judge(playerId, payload.decision, now); break;
         case 'nextMatch': this.#requireHost(playerId); f.next(now); break;
+        case 'closeVoting': this.#requireHost(playerId); f.closeVoting(now); break;
         default: throw new GameError('BAD_ACTION', 'Unknown action.');
       }
     });

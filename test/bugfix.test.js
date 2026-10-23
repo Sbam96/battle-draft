@@ -47,14 +47,14 @@ test('BUG 2: 3 players, host battling, the only voter drops: the match pauses in
   void m;
 });
 
-test('BUG 2: the voter reconnects: voting resumes with the time that was left, and their vote decides', () => {
+test('BUG 2: the voter reconnects: voting resumes with no time limit, and their vote decides', () => {
   const { r, m, neutrals, tokenOf } = hostBattling(3);
   const [lone] = neutrals;
   r.tick(T0); // nothing due yet
-  r.disconnect(lone, T0 + 20_000); // 30 s of the 50 s left
+  r.disconnect(lone, T0 + 20_000);
   r.join(tokenOf(lone), 'x', T0 + 200_000);
   assert.equal(Boolean(r.faceoff.match.paused), false);
-  assert.equal(r.turnDueAt(), T0 + 200_000 + 30_000);
+  assert.equal(r.turnDueAt(), null);
   const loser = r.hostId;
   const pick = m.a === loser ? allB(m) : allA(m);
   r.faceoffAction(lone, 'vote', { picks: pick }, T0 + 205_000);
@@ -95,7 +95,7 @@ test('BUG 2: 4 players, one neutral drops: the other neutral still votes, no pau
   r.disconnect(n2, T0 + 1000);
   assert.equal(Boolean(r.faceoff.match.paused), false);
   r.faceoffAction(n1, 'vote', { picks: allA(m) }, T0 + 2000);
-  r.tick(T0 + 50_000);
+  r.tick(T0 + 2000 + 30_000); // the offline voter gets 30 s to come back
   assert.equal(r.faceoff.match.winner, m.a);
 });
 
@@ -150,4 +150,36 @@ test('BUG 3: every view carries names for the characters on screen (landed, team
   v = r.viewFor(r.players[2].id);
   assert.equal(v.charNames[r.draft.teams.get(host)[0]], nameOf(landed), 'team members');
   assert.ok(Object.keys(v.charNames).length < 10, 'only what is on screen, not the whole list');
+});
+
+// ---------- 23 Oct play-test: no timers for placing or voting ----------
+test('BUG 4: the placement timer is still an option, and off means no time limit', () => {
+  const mk = (extra) => new Room({ id: 'r', hostName: 'Host', hostToken: 'th', settings: { roomName: 'R', visibility: 'private', roleCount: 5, roles: ['A', 'B', 'C', 'D', 'E'], cap: 8, turnOrder: 'join', ...extra } });
+  assert.equal(mk({ timerEnabled: true, timerSeconds: 15 }).settings.timerSeconds, 15);
+  const r = mk({ timerEnabled: false });
+  r.join('t2', 'P2'); r.join('t3', 'P3');
+  r.addCharacters(r.hostId, { text: names.join('\n') });
+  r.start(r.hostId, Math.random, T0);
+  r.draftAction(r.hostId, 'spin', {}, T0);
+  assert.equal(r.turnDueAt(), null);
+  assert.equal(r.tick(T0 + 60 * 60_000), false, 'an hour later the turn is still theirs');
+});
+test('BUG 4: voting timer is a host setting: off by default, or one of the listed times', () => {
+  const mk = (extra) => new Room({ id: 'r', hostName: 'Host', hostToken: 'th', settings: { roomName: 'R', visibility: 'private', roleCount: 5, roles: ['A', 'B', 'C', 'D', 'E'], cap: 8, turnOrder: 'join', ...extra } });
+  assert.equal(mk({}).settings.voteTimerEnabled, false);
+  assert.equal(mk({ voteTimerEnabled: true, voteTimerSeconds: 90 }).settings.voteTimerSeconds, 90);
+  assert.throws(() => mk({ voteTimerEnabled: true, voteTimerSeconds: 7 }), (e) => e.code === 'VOTE_TIMER');
+});
+test('BUG 4: only the host can close voting early', () => {
+  for (let k = 0; k < 200; k += 1) {
+    const { r, m, neutrals } = toFaceoff(4);
+    if (!neutrals.includes(r.hostId)) continue;
+    const other = neutrals.find((id) => id !== r.hostId);
+    r.faceoffAction(other, 'vote', { picks: allA(m) }, T0);
+    assert.throws(() => r.faceoffAction(other, 'closeVoting', {}, T0), (e) => e.code === 'NOT_HOST');
+    r.faceoffAction(r.hostId, 'closeVoting', {}, T0);
+    assert.equal(r.faceoff.match.winner, m.a);
+    return;
+  }
+  assert.fail('setup not found');
 });

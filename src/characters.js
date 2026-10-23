@@ -2,9 +2,11 @@
 // Rules:
 //  - One character per row. In pasted text a row of plain names separated by commas is several characters.
 //  - Column meaning comes from the content, not headers: a web link is the image, plain text is the name.
-//  - Duplicates (ignoring case and extra spaces) are dropped and reported. Variants like Pre-TS / Post-TS are kept.
+//  - Duplicates (ignoring case, spacing and punctuation, and known other names such as Shiliew = Shiryu)
+//    are dropped and reported. Variants like Pre-TS / Post-TS are kept.
 
 import { MAX_CHARACTERS } from './config.js';
+import { identityKey, normalise } from './aliases.js';
 
 export const CHAR_NAME_MAX = 60;
 export const URL_MAX = 2000;
@@ -83,12 +85,13 @@ export function parseText(text, { source = 'paste' } = {}) {
 
 // Merges parsed entries into an existing list, dropping duplicates. Pure: returns new values.
 export function mergeCharacters(existing, entries, { verse = '' } = {}) {
-  const seen = new Map(existing.map((c) => [nameKey(c.name), c]));
+  // Same character under another name counts as a duplicate too ("Shiliew" = "Shiryu"); see aliases.js.
+  const seen = new Map(existing.map((c) => [identityKey(c.name), c]));
   const added = [];
   const duplicates = [];
   for (const e of entries) {
-    const key = nameKey(e.name);
-    if (seen.has(key)) { if (!duplicates.some((d) => nameKey(d) === key)) duplicates.push(e.name); continue; }
+    const key = identityKey(e.name);
+    if (seen.has(key)) { if (!duplicates.some((d) => normalise(d) === normalise(e.name))) duplicates.push(e.name); continue; }
     const c = { name: e.name, image: e.image || null, verse };
     seen.set(key, c);
     added.push(c);

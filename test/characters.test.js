@@ -102,8 +102,20 @@ test('T7.17 same character twice: one kept, duplicate reported', () => {
 });
 test('T7.18 duplicates differing by case or spaces count as duplicates', () => {
   const { added, duplicates } = mergeCharacters([], parseText('Luffy\n luffy \nLUFFY\nMonkey  D. Luffy\nmonkey d. luffy').entries);
-  assert.deepEqual(added.map((c) => c.name), ['Luffy', 'Monkey D. Luffy']);
-  assert.deepEqual(duplicates, ['luffy', 'monkey d. luffy']);
+  assert.deepEqual(added.map((c) => c.name), ['Luffy']);
+  assert.deepEqual(duplicates, ['luffy', 'Monkey D. Luffy'], 'Monkey D. Luffy is another name for Luffy');
+});
+test('T7.18a the same character under another name counts as a duplicate (23 Oct play-test)', () => {
+  const text = 'Shiryu\nShiliew\nAkainu\nAkainu (Sakazuki)\nWho\'s-Who\nWho’s Who\nCharlotte Linlin (Big Mom)\nBig Mom\nTrafalgar Law\nTrafalgar D. Water Law\nRyokugyu\nRyokugyo (Aramaki)';
+  const { added, duplicates } = mergeCharacters([], parseText(text).entries);
+  assert.deepEqual(added.map((c) => c.name), ['Shiryu', 'Akainu', "Who's-Who", 'Charlotte Linlin (Big Mom)', 'Trafalgar Law', 'Ryokugyu']);
+  assert.equal(duplicates.length, 6);
+});
+test('T7.18b variants in brackets stay separate; different characters are never merged', () => {
+  const text = 'Monkey D. Luffy\nMonkey D. Luffy (Pre-TS)\nMonkey D. Luffy (Gear 5)\nBartholomew Kuma\nS-Bear\nKing\nQueen\nBoo\nMajin Buu';
+  const { added, duplicates } = mergeCharacters([], parseText(text).entries);
+  assert.equal(added.length, 9);
+  assert.deepEqual(duplicates, []);
 });
 test('T7.19 Pre-TS Luffy and Post-TS Luffy are both kept', () => {
   const r = room();

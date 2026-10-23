@@ -1,17 +1,17 @@
 // Phase 5: the face-off and tie-breaks. Test names start with the matrix ID they cover.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Faceoff, RESULT_MS, JUDGE_MS } from '../src/faceoff.js';
+import { Faceoff, RESULT_MS, JUDGE_MS, ABSENT_VOTER_MS } from '../src/faceoff.js';
 
 const T0 = 1_000_000;
 const code = (fn) => { try { fn(); } catch (e) { return e.code; } return null; };
 
 // players: ids; host: id; teams: optional overrides { A: ['x', null, ...] }
-function setup({ players = ['A', 'B', 'C'], host = players[0], roleCount = 5, teams = {}, random, offline = [] } = {}) {
+function setup({ players = ['A', 'B', 'C'], host = players[0], roleCount = 5, teams = {}, random, offline = [], voteSeconds = 0 } = {}) {
   const t = new Map(players.map((p) => [p, teams[p] ?? Array.from({ length: roleCount }, (_, i) => `${p}${i}`)]));
   const list = players.map((id) => ({ id, connected: !offline.includes(id) }));
   const ctx = { players: () => list, hostId: () => host };
-  const f = new Faceoff({ order: players, teams: t, roleCount, ctx, ...(random ? { random } : {}) });
+  const f = new Faceoff({ order: players, teams: t, roleCount, ctx, voteSeconds, ...(random ? { random } : {}) });
   f.begin(T0);
   return { f, list };
 }
@@ -122,43 +122,88 @@ test('T9.19 every role empty on one side: the match is decided without any vote'
   }
 });
 
-// ---------- vote timer and stand-ins ----------
-test('T9.20 voting time is 50 s for 5 roles and 100 s for 10', () => {
-  assert.equal(setup().f.dueAt(), T0 + 50_000);
-  assert.equal(setup({ roleCount: 10 }).f.dueAt(), T0 + 100_000);
+// ---------- voting timer is a host setting, off by default (23 Oct 2026); stand-ins ----------
+test('T9.20 voting timer off: voting waits, however long, while a connected voter is choosing', () => {
+  const { f } = setup({ players: ['A', 'B', 'C', 'D'] });
+  assert.equal(f.dueAt(), null);
+  const [v1] = neutrals(f);
+  f.vote(v1, ballot(f, 'a'), T0 + 1000);
+  assert.equal(f.dueAt(), null, 'still no deadline with the other voter online');
+  assert.equal(f.match.stage, 'voting');
+  assert.equal(setup({ roleCount: 10 }).f.dueAt(), null);
 });
-test('T9.21 a voter who never votes: the host’s ballot stands in when the time runs out', () => {
+test('T9.20b voting timer on (60 s): voting closes when it runs out; missing votes are stood in', () => {
+  const { f } = setup({ players: ['A', 'B', 'C', 'D'], voteSeconds: 60 });
+  assert.equal(f.dueAt(), T0 + 60_000);
+  const [v1] = neutrals(f);
+  f.vote(v1, ballot(f, 'a'), T0 + 1000);
+  assert.equal(f.dueAt(), T0 + 60_000, 'one vote in does not change the deadline');
+  f.timeout(T0 + 60_000);
+  assert.equal(f.match.stage, 'result');
+  assert.equal(f.match.winner, f.match.a);
+});
+test('T9.20c voting timer on: an offline voter never stretches the time past the timer', () => {
+  const { f, list } = setup({ players: ['A', 'B', 'C', 'D'], voteSeconds: 30 });
+  const [v1, v2] = neutrals(f);
+  f.vote(v1, ballot(f, 'a'), T0 + 20_000);
+  list.find((p) => p.id === v2).connected = false;
+  f.refresh(T0 + 21_000);
+  assert.equal(f.dueAt(), T0 + 30_000);
+});
+test('T9.20a voting closes as soon as everyone has voted', () => {
+  const { f } = setup({ players: ['A', 'B', 'C', 'D'] });
+  voteAll(f, 'a', T0 + 500_000);
+  assert.equal(f.match.stage, 'result');
+});
+test('T9.21 host closes voting: the host’s ballot stands in for anyone who hasn’t voted', () => {
   const { f } = setup({ players: ['A', 'B', 'C', 'D', 'E'], host: 'A', random: () => 0 });
   const m = f.match;
   const voters = neutrals(f);
   if (!voters.includes('A')) return; // host is battling in this bracket: covered by the next test
   f.vote('A', ballot(f, 'b'), T0);
-  f.timeout(T0 + 50_000);
+  f.closeVoting(T0 + 5000);
   assert.equal(m.standIn.by, 'A');
   assert.equal(f.match.winner, m.b);
 });
+test('T9.21a closing voting needs at least one vote', () => {
+  const { f } = setup({ players: ['A', 'B', 'C', 'D'] });
+  assert.equal(code(() => f.closeVoting(T0)), 'NO_VOTES');
+  assert.equal(f.match.stage, 'voting');
+});
 test('T9.22 host is battling: another neutral who voted stands in', () => {
-  // Force the host into the first match by giving a 3-player bracket where the host is never the bye.
   for (let k = 0; k < 40; k += 1) {
     const { f } = setup({ players: ['A', 'B', 'C', 'D'], host: 'A' });
     if (f.match.a !== 'A' && f.match.b !== 'A') continue;
     const [v1] = neutrals(f); // the other neutral never votes
     f.vote(v1, ballot(f, 'a'), T0);
-    f.timeout(T0 + 60_000);
+    f.closeVoting(T0 + 60_000);
     assert.equal(f.match.standIn.by, v1, 'the neutral who voted stands in, not the battling host');
     assert.equal(f.match.winner, f.match.a);
     return;
   }
   assert.fail('host never drawn into the first match');
 });
-test('T9.23 a voter disconnects mid-vote: treated as not voting, passes on after the time limit', () => {
+test('T9.23 the only voter left to vote is offline: voting closes 30 s later unless they come back', () => {
   const { f, list } = setup({ players: ['A', 'B', 'C', 'D'] });
   const [v1, v2] = neutrals(f);
   f.vote(v1, ballot(f, 'a'), T0);
   list.find((p) => p.id === v2).connected = false;
-  assert.equal(f.match.stage, 'voting');
-  f.timeout(T0 + 50_000);
+  f.refresh(T0 + 1000);
+  assert.equal(f.dueAt(), T0 + 1000 + ABSENT_VOTER_MS);
+  list.find((p) => p.id === v2).connected = true;
+  f.refresh(T0 + 5000);
+  assert.equal(f.dueAt(), null, 'back online: no time limit again');
+  list.find((p) => p.id === v2).connected = false;
+  f.refresh(T0 + 6000);
+  f.timeout(T0 + 6000 + ABSENT_VOTER_MS);
   assert.notEqual(f.match.stage, 'voting');
+});
+test('T9.23a an offline voter does not start the 30 s wait while nobody has voted yet', () => {
+  const { f, list } = setup({ players: ['A', 'B', 'C', 'D'] });
+  const [, v2] = neutrals(f);
+  list.find((p) => p.id === v2).connected = false;
+  f.refresh(T0 + 1000);
+  assert.equal(f.dueAt(), null);
 });
 
 // ---------- R10 tie-breaks ----------

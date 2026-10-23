@@ -130,6 +130,21 @@ test('P14 variants are separate characters (Pre-TS / Post-TS)', { skip }, async 
   const res = await store.addCharacters('ste_96', { verseId: await verseId('One Piece'), text: 'Pre-TS Luffy\nPost-TS Luffy' });
   assert.equal(res.added.length, 2);
 });
+test('P14a the same character under another name is a duplicate (Shiliew = Shiryu)', { skip }, async () => {
+  const first = await store.addCharacters('ste_96', { verseName: 'One Piece Alias Test', text: 'Shiryu\nAkainu' });
+  assert.deepEqual(first.added, ['Shiryu', 'Akainu']);
+  const res = await store.addCharacters('ste_96', { verseId: first.verse.id, text: 'Shiliew\nAkainu (Sakazuki)\nSakazuki\nShiryu of the Rain' });
+  assert.deepEqual(res.added, []);
+  assert.equal(res.duplicates.length, 4);
+});
+test('P14b the admin sees possible duplicates already in a verse, to tidy up', { skip }, async () => {
+  const id = await verseId('Dragon Ball');
+  await db.query("INSERT INTO pool_characters (verse_id, name, name_key) VALUES ($1, 'Kakarot', 'kakarot'), ($1, 'Vegeta (Ultra Ego)', 'vegeta (ultra ego)')", [id]);
+  const groups = await store.verseDuplicates(id);
+  const names = groups.map((g) => g.map((c) => c.name).sort().join(' + '));
+  assert.ok(names.some((n) => n.includes('Goku') && n.includes('Kakarot')), names.join('; '));
+  assert.ok(names.some((n) => n.includes('Vegeta') && n.includes('Ultra Ego')), 'bracketed variants are listed for a person to check');
+});
 test('P15 unsafe links are dropped; the name is still added', { skip }, async () => {
   const res = await store.addCharacters('ste_96', { verseId: await verseId('Bleach'), source: 'csv', text: 'Nelliel Tu Odelschwanck,javascript:alert(1)' });
   assert.deepEqual(res.added, ['Nelliel Tu Odelschwanck']);

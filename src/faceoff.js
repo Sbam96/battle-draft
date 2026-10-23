@@ -1,8 +1,10 @@
 // Face-off (R9, R10): a random knockout bracket. Matches are played one at a time, role vs role.
 // Neutral players vote on every pairing in one go; the two battlers sit out.
 //  - One side's role empty: the other side wins that pairing automatically. Both empty: nobody scores.
-//  - Voting time: 10 s per role (50 s / 100 s). Missing ballots are filled by the host's ballot
-//    (or another neutral's if the host is battling or didn't vote).
+//  - Voting timer is a host setting (23 Oct 2026). Off: voting closes when every neutral player has voted;
+//    if the only ones left are disconnected, it closes 30 s later. On: it also closes when the time runs
+//    out. Either way the host can close voting once at least one vote is in. Missing ballots are filled by the host's ballot (or another neutral's if the host is
+//    battling or didn't vote).
 //  - Tied pairings, then a level match, go to a judge: the host if neutral; otherwise the lone neutral
 //    (3 players) or a randomly appointed neutral (4+). A judge who doesn't answer is replaced.
 //  - Odd number of teams in a round: one gets a bye, rotating so nobody gets two while others have none.
@@ -12,12 +14,14 @@ import { DraftError } from './draft.js';
 
 export const RESULT_MS = 12_000; // how long a match result stays up before the next match
 export const JUDGE_MS = 60_000;
+export const ABSENT_VOTER_MS = 30_000; // how long voting waits for voters who are disconnected
 
 export class Faceoff {
   // ctx: { players: () => [{ id, connected }], hostId: () => id }
-  constructor({ order, teams, roleCount, ctx, random = (n) => randomInt(n) }) {
+  constructor({ order, teams, roleCount, ctx, voteSeconds = 0, random = (n) => randomInt(n) }) {
     this.roleCount = roleCount;
-    this.voteMs = roleCount * 10_000;
+    this.voteLimitMs = voteSeconds > 0 ? voteSeconds * 1000 : 0; // 0 = no voting timer
+    this.voteMs = this.voteLimitMs || ABSENT_VOTER_MS;
     this.ctx = ctx;
     this.random = random;
     this.teams = new Map(order.map((p) => [p, [...(teams.get(p) || Array(roleCount).fill(null))]]));
@@ -81,7 +85,7 @@ export class Faceoff {
       const auto = ca != null && cb != null ? null : ca != null ? 'a' : cb != null ? 'b' : 'none';
       return { role: i, a: ca, b: cb, auto, winner: auto === 'none' ? null : auto, votes: null };
     });
-    this.match = { id: meta.id, a, b, stage: 'voting', pairings, ballots: new Map(), deadline: now + this.voteMs, judge: null, startedAt: now, paused: null };
+    this.match = { id: meta.id, a, b, stage: 'voting', pairings, ballots: new Map(), deadline: null, voteEndsAt: this.voteLimitMs ? now + this.voteLimitMs : null, judge: null, startedAt: now, paused: null };
     if (!pairings.some((p) => p.auto === null)) this.#resolveVotes(now);
     else this.refresh(now);
   }
@@ -104,8 +108,31 @@ export class Faceoff {
       ballot[p.role] = choice;
     }
     m.ballots.set(pid, ballot);
-    const all = this.eligibleVoters();
-    if (all.every((v) => m.ballots.has(v))) this.#resolveVotes(now);
+    this.#checkVoting(now);
+  }
+
+  // Voting closes once everyone who can vote has voted. If the only ones left are disconnected, it waits
+  // ABSENT_VOTER_MS for them to come back (their ballot is then filled by a stand-in). Nobody online is
+  // ever rushed: while a connected player is still choosing, there is no deadline.
+  #checkVoting(now) {
+    const m = this.match;
+    if (!m || m.stage !== 'voting' || m.paused) return;
+    const missing = this.eligibleVoters().filter((v) => !m.ballots.has(v));
+    if (!missing.length) { this.#resolveVotes(now); return; }
+    const online = new Set(this.ctx.players().filter((p) => p.connected).map((p) => p.id));
+    const waitingOnline = missing.some((v) => online.has(v));
+    let due = null;
+    if (!waitingOnline && m.ballots.size) due = m.deadline ?? now + ABSENT_VOTER_MS;
+    if (m.voteEndsAt != null) due = due == null ? m.voteEndsAt : Math.min(due, m.voteEndsAt);
+    m.deadline = due;
+  }
+
+  // Host: stop waiting and count the votes that are in (at least one).
+  closeVoting(now) {
+    const m = this.match;
+    if (!m || m.stage !== 'voting') throw new DraftError('NOT_VOTING', 'There’s nothing to vote on right now.');
+    if (!m.ballots.size) throw new DraftError('NO_VOTES', 'Wait for at least one vote before closing voting.');
+    this.#resolveVotes(now);
   }
 
   #resolveVotes(now) {
@@ -157,21 +184,24 @@ export class Faceoff {
     const online = this.#neutrals({ connectedOnly: true });
     if (!this.#neutrals().length) { this.#noJudgePossible(now); return true; }
     if (!online.length && !m.paused) {
-      m.paused = { since: now, remaining: Math.max(15_000, (m.deadline ?? now) - now) };
+      m.paused = { since: now, remaining: m.deadline == null ? null : Math.max(15_000, m.deadline - now),
+        voteLeft: m.voteEndsAt == null ? null : Math.max(15_000, m.voteEndsAt - now) };
       m.deadline = null;
       return true;
     }
     if (online.length && m.paused) {
-      const { remaining } = m.paused;
+      const { remaining, voteLeft: remainingVote } = m.paused;
       m.paused = null;
-      m.deadline = now + remaining;
+      m.deadline = remaining == null ? null : now + remaining;
       if (m.stage === 'judging' && !online.includes(m.judge?.id)) this.#askJudge(m.judge.kind, m.judge.roles, now, { fresh: true });
+      if (m.stage === 'voting') { m.deadline = null; if (m.paused === null && remainingVote != null) m.voteEndsAt = now + remainingVote; this.#checkVoting(now); }
       return true;
     }
     if (m.stage === 'judging' && m.judge?.id && !online.includes(m.judge.id)) {
       this.#askJudge(m.judge.kind, m.judge.roles, now); // judge dropped: ask the next one straight away
       return true;
     }
+    if (m.stage === 'voting') { const before = m.deadline; this.#checkVoting(now); return m.deadline !== before || m.stage !== 'voting'; }
     return false;
   }
 
@@ -279,7 +309,8 @@ export class Faceoff {
     if (m?.stage === 'voting') {
       m.ballots.delete(pid);
       if (!this.#neutrals().length) { this.#noJudgePossible(now); return; }
-      if (this.eligibleVoters().every((v) => m.ballots.has(v))) { this.#resolveVotes(now); return; }
+      this.#checkVoting(now);
+      if (m.stage !== 'voting') return;
     }
     if (m?.stage === 'judging' && m.judge.id === pid) { this.#askJudge(m.judge.kind, m.judge.roles, now); return; }
     this.refresh(now);
@@ -294,9 +325,11 @@ export class Faceoff {
       alive: [...this.alive],
       champion: this.champion,
       finished: this.finished,
-      voteMs: this.voteMs,
+      voteMs: m && m.voteEndsAt != null && m.deadline === m.voteEndsAt ? this.voteLimitMs : ABSENT_VOTER_MS,
+      voteTimer: this.voteLimitMs,
       match: m && {
         id: m.id, a: m.a, b: m.b, stage: m.stage, deadline: m.paused ? null : m.deadline, winner: m.winner ?? null,
+        offlineWait: m.stage === 'voting' && m.deadline != null && m.deadline !== m.voteEndsAt,
         paused: Boolean(m.paused), waitingFor: m.paused ? this.#neutrals() : [],
         noJudge: Boolean(m.noJudge), coinToss: Boolean(m.coinToss),
         score: m.score ?? null, walkover: Boolean(m.walkover), judged: Boolean(m.judged),

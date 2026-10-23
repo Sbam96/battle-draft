@@ -28,7 +28,8 @@
     .imgs figcaption { font-size: 0.8rem; overflow-wrap: anywhere; margin-top: 6px; }
     .stats { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); margin-bottom: 14px; font-weight: 700; }
     .empty { color: var(--muted); }
-  </style>
+    .dup-group { border-left: 4px solid #e0a800; padding-left: 8px; margin-bottom: 12px; }
+</style>
 </head>
 <body>
   <main id="app">
@@ -178,11 +179,20 @@
           return [stats, list];
         }
         const list = el('ul', { class: 'list' }, el('li', {}, 'Loading…'));
-        const refresh = () => call('GET', `/admin/api/pool/verses/${verse.id}`).then(({ characters }) => list.replaceChildren(...characters.map((ch) => el('li', {},
+        const dups = el('div', {});
+        const row = (ch) => el('li', {},
           el('span', { class: 'grow' }, ch.name, ch.image ? el('small', { class: 'hint' }, ' · ', safeLink(ch.image)) : null),
-          btn('Remove', async () => { if (confirm(`Remove ${ch.name} from ${verse.name}?`)) { await call('DELETE', `/admin/api/pool/characters/${ch.id}`); refresh(); } }, 'btn btn-small btn-danger')))));
+          btn('Remove', async () => { if (confirm(`Remove ${ch.name} from ${verse.name}?`)) { await call('DELETE', `/admin/api/pool/characters/${ch.id}`); refresh(); } }, 'btn btn-small btn-danger'));
+        const refresh = () => call('GET', `/admin/api/pool/verses/${verse.id}`).then(({ characters, duplicates = [] }) => {
+          dups.replaceChildren(...(duplicates.length ? [
+            el('h3', {}, `Possible duplicates (${duplicates.length})`),
+            el('p', { class: 'hint' }, 'These look like the same character under different names. Keep one name in each group and remove the rest. Variants such as Pre-TS and Post-TS are listed here too if they share a name, so check before removing.'),
+            ...duplicates.map((g) => el('ul', { class: 'list dup-group' }, g.map(row))),
+          ] : []));
+          list.replaceChildren(...characters.map(row));
+        });
         refresh();
-        return [stats, btn('‹ All verses', () => { verse = null; render(); }, 'back'), el('h3', {}, verse.name), list];
+        return [stats, btn('‹ All verses', () => { verse = null; render(); }, 'back'), el('h3', {}, verse.name), dups, el('h3', {}, 'All characters'), list];
       },
     };
 

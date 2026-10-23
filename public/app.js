@@ -28,9 +28,30 @@ const html = (strings, ...vals) => raw(strings.reduce((out, s, i) => out + s + (
 
 // ---------- state ----------
 const ROLE_HINTS = ['Captain', 'Vice captain', 'Strategist', 'Support', 'Wildcard', 'Tank', 'Healer', 'Scout', 'Rival', 'Mentor'];
+const DEFAULT_ROOM = { roomName: '', visibility: 'private', roleCount: 5, roles: Array(10).fill(''), cap: 8, turnOrder: 'join', releasedHoldToBin: 'yes', timer: 'off', voteTimer: 'off' };
+// Reads saved room settings, keeping only known fields with sensible values.
+function savedRoom() {
+  try {
+    const raw = JSON.parse(store.get('bd-room-settings') || 'null');
+    if (!raw || typeof raw !== 'object') return {};
+    const out = {};
+    if (typeof raw.roomName === 'string') out.roomName = raw.roomName.slice(0, 40);
+    if (['private', 'public'].includes(raw.visibility)) out.visibility = raw.visibility;
+    if ([5, 10].includes(raw.roleCount)) out.roleCount = raw.roleCount;
+    if (Array.isArray(raw.roles)) out.roles = Array.from({ length: 10 }, (_, i) => String(raw.roles[i] ?? '').slice(0, 30));
+    if (Number.isInteger(Number(raw.cap))) out.cap = Number(raw.cap);
+    if (['join', 'shuffle'].includes(raw.turnOrder)) out.turnOrder = raw.turnOrder;
+    if (['yes', 'no'].includes(raw.releasedHoldToBin)) out.releasedHoldToBin = raw.releasedHoldToBin;
+    if (typeof raw.timer === 'string') out.timer = raw.timer;
+    if (typeof raw.voteTimer === 'string') out.voteTimer = raw.voteTimer;
+    return out;
+  } catch { return {}; }
+}
+
 const state = {
+  roomSaved: Boolean(store.get('bd-room-settings')),
   screen: 'home',
-  config: { maxPlayers: { 5: 56, 10: 34 }, timerOptions: [15, 30, 45, 60] },
+  config: { maxPlayers: { 5: 56, 10: 34 }, timerOptions: [15, 30, 45, 60], voteTimerOptions: [30, 60, 90, 120] },
   view: null,
   roomId: null,
   peek: null,
@@ -55,7 +76,7 @@ const state = {
   endMode: 'swap', // end phase: 'swap' | 'bin' | 'extra'
   endFirst: null, // first role picked for a swap
   binChoice: null, // character picked from the bin
-  ballots: {}, // matchId -> { role: 'a' | 'b' }
+  ballots: {}, // matchKey (room:game:match) -> { role: 'a' | 'b' }
   judgeDecision: {},
   img: new Map(), // charId -> 'loading' | 'ok' | 'fail'
   // community pool
@@ -66,8 +87,7 @@ const state = {
   lobbyPool: { verses: null, picked: [], busy: false },
   contactSent: false,
   form: {
-    name: store.get('bd-name') || '', roomName: '', visibility: 'private', roleCount: 5,
-    roles: Array(10).fill(''), cap: 8, turnOrder: 'join', releasedHoldToBin: 'yes', timer: 'off',
+    name: store.get('bd-name') || '', ...DEFAULT_ROOM, ...savedRoom(),
     charName: '', charImage: '', charPaste: '', charVerse: '', charSearch: '',
     poolIdentity: store.get('bd-pool-id') || '', poolNote: '', poolName: '', poolImage: '', poolPaste: '', poolNewVerse: '', poolSearch: '',
     contactName: '', contactReply: '', contactMessage: '',
@@ -417,27 +437,36 @@ const actions = {
   pickVote(el) {
     const m = state.view?.faceoff?.match;
     if (!m) return;
-    state.ballots[m.id] = { ...(state.ballots[m.id] || {}), [el.dataset.role]: el.dataset.side };
+    const k = matchKey(state.view, m);
+    state.ballots[k] = { ...(state.ballots[k] || {}), [el.dataset.role]: el.dataset.side };
     render();
   },
   async submitVote() {
     const m = state.view?.faceoff?.match;
-    const r = await emit('vote', { picks: state.ballots[m.id] || {} });
+    const r = await emit('vote', { picks: state.ballots[matchKey(state.view, m)] || {} });
     if (!r.ok) toast(r.message);
   },
   pickJudge(el) {
     const m = state.view?.faceoff?.match;
-    state.judgeDecision[m.id] = { ...(state.judgeDecision[m.id] || {}), [el.dataset.role]: el.dataset.side };
+    const k = matchKey(state.view, m);
+    state.judgeDecision[k] = { ...(state.judgeDecision[k] || {}), [el.dataset.role]: el.dataset.side };
     render();
   },
   async submitJudge(el) {
     const m = state.view?.faceoff?.match;
-    const decision = m.judge.kind === 'team' ? el.dataset.side : state.judgeDecision[m.id] || {};
+    const decision = m.judge.kind === 'team' ? el.dataset.side : state.judgeDecision[matchKey(state.view, m)] || {};
     const r = await emit('judge', { decision });
     if (!r.ok) toast(r.message);
   },
   async restart() { const r = await emit('restart'); if (!r.ok) toast(r.message); },
+  saveRoomSettings() { saveRoomSettings(); toast('Room settings saved on this device.'); render(); },
+  resetRoomSettings() {
+    try { localStorage.removeItem('bd-room-settings'); } catch { /* nothing saved */ }
+    Object.assign(state.form, DEFAULT_ROOM, { roles: Array(10).fill('') });
+    state.roomSaved = false; toast('Back to the default settings.'); render();
+  },
   async nextMatch() { const r = await emit('nextMatch'); if (!r.ok) toast(r.message); },
+  async closeVoting() { if (!confirm('Close voting and count the votes that are in?')) return; const r = await emit('closeVoting'); if (!r.ok) toast(r.message); },
   async voteKick(el) {
     const r = await emit('voteKick', { playerId: el.dataset.id });
     if (!r.ok) toast(r.message); else if (r.kicked) toast('Player removed by vote', true);
@@ -474,6 +503,13 @@ const actions = {
   },
 };
 
+// Saved room settings (23 Oct 2026): kept in this browser so a host doesn't retype roles every game.
+function roomSettingsFromForm(f) {
+  return { roomName: f.roomName, visibility: f.visibility, roleCount: f.roleCount, roles: [...f.roles], cap: f.cap,
+    turnOrder: f.turnOrder, releasedHoldToBin: f.releasedHoldToBin, timer: f.timer, voteTimer: f.voteTimer };
+}
+function saveRoomSettings() { store.set('bd-room-settings', JSON.stringify(roomSettingsFromForm(state.form))); state.roomSaved = true; }
+
 const forms = {
   async create(form) {
     const f = state.form;
@@ -481,12 +517,14 @@ const forms = {
       roomName: f.roomName, visibility: f.visibility, roleCount: f.roleCount,
       roles: f.roles.slice(0, f.roleCount), cap: Number(f.cap), turnOrder: f.turnOrder,
       releasedHoldToBin: f.releasedHoldToBin === 'yes', timerEnabled: f.timer !== 'off', timerSeconds: Number(f.timer) || 30,
+      voteTimerEnabled: f.voteTimer !== 'off', voteTimerSeconds: Number(f.voteTimer) || 60,
     };
     state.busy = true; render();
     const res = await emit('create', { settings, name: f.name, token });
     state.busy = false;
     if (!res.ok) { state.error = res.message; render(); form.querySelector('.error-text')?.scrollIntoView({ block: 'center' }); return; }
     store.set('bd-name', f.name.trim());
+    saveRoomSettings(); // the last game's settings are ready next time
     state.roomId = res.roomId;
     setPath(`/r/${res.roomId}`);
   },
@@ -600,7 +638,8 @@ function seg(name, field, options, current, change = '') {
 function createScreen() {
   const f = state.form;
   const max = state.config.maxPlayers[f.roleCount];
-  const timerOpts = [['off', 'Off'], ...state.config.timerOptions.map((s) => [String(s), `${s}s`])];
+  const timerOpts = [['off', 'Off'], ...state.config.timerOptions.map((x) => [String(x), `${x}s`])];
+  const voteTimerOpts = [['off', 'Off'], ...(state.config.voteTimerOptions || [30, 60, 90, 120]).map((x) => [String(x), `${x}s`])];
   return html`
     ${back()}
     <header class="screen-head"><h2>Create a game</h2><p>Set the rules, then share the link with your friends.</p></header>
@@ -641,9 +680,17 @@ function createScreen() {
         <div class="choice"><span class="label">Placement timer</span>
           ${seg('timer', 'timer', timerOpts, f.timer)}
           <p class="hint" style="margin-top:6px">If it runs out, the character goes back on the wheel and that turn is lost.</p></div>
+        <div class="choice"><span class="label">Voting timer</span>
+          ${seg('vtimer', 'voteTimer', voteTimerOpts, f.voteTimer)}
+          <p class="hint" style="margin-top:6px">Time to vote on each face-off match. Off: voting ends when everyone has voted, or when you close it.</p></div>
       </section>
 
       ${state.error ? html`<p class="error-text" role="alert">${state.error}</p>` : ''}
+      <div class="saved-settings">
+        <button class="btn btn-small" type="button" data-action="saveRoomSettings">Save these settings</button>
+        ${state.roomSaved ? html`<button class="btn btn-small btn-ghost" type="button" data-action="resetRoomSettings">Reset to defaults</button>` : ''}
+        <p class="hint">${state.roomSaved ? 'Saved on this device. They’re filled in next time you create a game.' : 'Save the room name, roles and rules on this device for next time.'}</p>
+      </div>
       <button class="btn btn-primary btn-block" type="submit" ${raw(state.busy ? 'disabled' : '')}>Create game</button>
     </form>`;
 }
@@ -1049,7 +1096,8 @@ function lobbyScreen(v) {
             <dt>Hold</dt><dd>1 each</dd>
             <dt>Turn order</dt><dd>${s.turnOrder === 'shuffle' ? 'Shuffled at start' : 'Order of joining'}</dd>
             <dt>Released holds</dt><dd>${s.releasedHoldToBin ? 'Go in the bin' : 'Back on the wheel'}</dd>
-            <dt>Timer</dt><dd>${s.timerEnabled ? `${s.timerSeconds} seconds` : 'Off'}</dd>
+            <dt>Placement timer</dt><dd>${s.timerEnabled ? `${s.timerSeconds} seconds` : 'Off'}</dd>
+            <dt>Voting timer</dt><dd>${s.voteTimerEnabled ? `${s.voteTimerSeconds} seconds` : 'Off'}</dd>
           </dl>
         </section>
       </div>
@@ -1397,6 +1445,10 @@ function bracket(v) {
     </div>`)}</div>`;
 }
 
+// Match numbers restart at 1 in every game and every room, so picks are kept per room, game and match.
+// (Keying by match number alone showed last game's picks as if already chosen: 23 Oct play-test.)
+function matchKey(v, m) { return `${v.id}:${v.game || 1}:${m.id}`; }
+
 function matchView(v) {
   const f = v.faceoff;
   const m = f.match;
@@ -1404,9 +1456,9 @@ function matchView(v) {
   const A = pName(v, m.a); const B = pName(v, m.b);
   const battling = v.you === m.a || v.you === m.b;
   const canVote = m.stage === 'voting' && !battling && m.voters.includes(v.you) && !m.myBallot;
-  const myPicks = state.ballots[m.id] || {};
+  const myPicks = state.ballots[matchKey(v, m)] || {};
   const judging = m.stage === 'judging' && m.judge.id === v.you;
-  const jd = state.judgeDecision[m.id] || {};
+  const jd = state.judgeDecision[matchKey(v, m)] || {};
   const roleName = (i) => v.settings.roles[i];
   const cell = (p, side) => {
     const id = side === 'a' ? p.a : p.b;
@@ -1432,6 +1484,14 @@ function matchView(v) {
       ? html`<button class="btn btn-primary btn-block" data-action="submitVote" ${raw(allPicked ? '' : 'disabled')}>Submit votes</button>
           ${allPicked ? '' : html`<p class="hint center">Pick a winner in every row.</p>`}`
       : html`<p class="prompt">${battling ? 'You’re battling, so you sit this vote out.' : m.myBallot ? 'Votes in. Waiting for the others.' : 'Waiting for votes.'} ${m.voted.length}/${m.voters.length} voted.</p>`;
+    const still = m.voters.filter((id) => !m.voted.includes(id));
+    if (still.length && !canVote) {
+      status = html`${status}<p class="hint center">${f.voteTimer ? '' : 'No time limit. '}Still to vote: ${still.map((id) => pName(v, id)).join(', ')}.${m.offlineWait ? ' They’re offline, so voting closes when the bar runs out unless they come back.' : ''}</p>`;
+    }
+    if (v.isHost && m.voted.length && still.length) {
+      status = html`${status}<button class="btn btn-small" data-action="closeVoting">Close voting now</button>
+        <p class="hint center">Counts the votes that are in. Missing votes copy ${m.voted.includes(v.you) ? 'yours' : 'a neutral player’s'}.</p>`;
+    }
   } else if (m.stage === 'judging') {
     const judgeName = pName(v, m.judge.id);
     if (!judging) status = html`<p class="prompt">It’s a tie. ${judgeName} is deciding.</p>`;
