@@ -286,11 +286,13 @@ export class Room {
   }
 
   // Called by the server when a player's 30-second grace period ends (R6.7, R6.8).
-  expireGrace(playerId) {
+  // removeFromLobby: false keeps a dropped player's place in the lobby for longer (their phone may just
+  // have locked); the host role still passes on after the grace period so the game isn't held up.
+  expireGrace(playerId, { removeFromLobby = true } = {}) {
     const p = this.player(playerId);
     if (!p || p.connected) return false; // came back in time: nothing happens
     const wasHost = playerId === this.hostId;
-    if (this.phase === 'lobby') this.#removePlayer(playerId);
+    if (this.phase === 'lobby' && removeFromLobby) this.#removePlayer(playerId);
     if (wasHost) this.#handOverHost(playerId);
     this.#syncFaceoff();
     this.#touch();
@@ -433,11 +435,21 @@ export class Room {
     return reasons;
   }
 
+  // A player still away from the lobby after the longer hold is removed (26 Oct 2026).
+  dropAwayFromLobby(playerId) {
+    const p = this.player(playerId);
+    if (!p || p.connected || this.phase !== 'lobby') return false;
+    this.#removePlayer(playerId);
+    return true;
+  }
+
   start(byId, rng = Math.random, now = Date.now()) {
     this.#requireHost(byId);
     this.#requireLobby();
     const blockers = this.startBlockers();
     if (blockers.length) throw new GameError('CANT_START', blockers[0]);
+    // Anyone whose phone is still locked when the game starts sits this one out (they can join the next).
+    for (const p of this.players.filter((x) => !x.connected)) this.#removePlayer(p.id, now);
     const order = this.connectedPlayers.sort((a, b) => a.joinIndex - b.joinIndex).map((p) => p.id);
     if (this.settings.turnOrder === 'shuffle') {
       for (let i = order.length - 1; i > 0; i -= 1) {
@@ -662,6 +674,7 @@ export class Room {
     const isHost = playerId === this.hostId;
     return {
       id: this.id,
+      code: this.code ?? null,
       version: this.version,
       phase: this.phase,
       settings: this.settings,

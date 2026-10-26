@@ -96,7 +96,7 @@ const state = {
     charName: '', charImage: '', charPaste: '', charVerse: '', charSearch: '',
     poolIdentity: store.get('bd-pool-id') || '', poolNote: '', poolName: '', poolImage: '', poolPaste: '', poolNewVerse: '', poolSearch: '',
     contactName: '', contactReply: '', contactMessage: '',
-    tradeGiveFunds: '', tradeGetFunds: '',
+    tradeGiveFunds: '', tradeGetFunds: '', joinCode: '',
   },
 };
 
@@ -157,12 +157,24 @@ function notice(title, message) {
 // ---------- routing ----------
 async function route() {
   const m = location.pathname.match(/^\/r\/([A-Za-z0-9_-]+)/);
+  const j = location.pathname.match(/^\/j\/([A-Za-z0-9]+)/);
   if (m) await openRoomLink(m[1]);
+  else if (j) await openCode(j[1]);
   else if (location.pathname === '/pool') await actions.openPool();
   else if (location.pathname === '/contact') go('contact', { contactSent: false });
   else go('home');
 }
 window.addEventListener('popstate', route);
+
+// Join by code (26 Oct 2026): the code finds the room, then it's the same as opening the invite link.
+async function openCode(code) {
+  const res = await emit('findCode', { code });
+  if (!res.ok) { state.codeError = res.message; setPath('/'); go('home'); return false; }
+  state.codeError = '';
+  setPath(`/r/${res.roomId}`);
+  await openRoomLink(res.roomId);
+  return true;
+}
 
 async function openRoomLink(id) {
   state.roomId = id;
@@ -199,25 +211,73 @@ socket.on('room', (view) => {
 });
 // ---------- keeping the screen awake while in a room ----------
 // Stops phones dimming and locking mid-game, which was the main cause of disconnects.
-// Phones drop the lock when you switch apps, so it's re-applied whenever the game is visible again.
-const wake = { lock: null, wanted: false, pending: false };
-async function requestWake() {
-  if (!wake.wanted || wake.lock || wake.pending || document.visibilityState !== 'visible' || !('wakeLock' in navigator)) return;
-  wake.pending = true;
-  try {
-    wake.lock = await navigator.wakeLock.request('screen');
-    wake.lock.addEventListener('release', () => { wake.lock = null; });
-  } catch { /* not allowed right now (e.g. low battery mode); tried again on the next tap */ }
-  wake.pending = false;
+// 1) The Wake Lock API where the browser has it (re-applied whenever the game is visible again, because
+//    phones drop it when you switch apps).
+// 2) Fallback for browsers without it or that refuse it (older iPhones, in-app browsers such as WhatsApp's,
+//    Low Power Mode): a tiny silent video looping out of sight, which keeps the screen on. Browsers only let
+//    it start from a tap, so it starts on the player's next tap anywhere.
+// The room shows a "Keep my screen on" button whenever neither is working, so players know.
+const wake = { lock: null, wanted: false, pending: false, video: null, videoOn: false, failed: false };
+const wakeActive = () => Boolean(wake.lock) || wake.videoOn;
+function wakeVideo() {
+  if (wake.video) return wake.video;
+  const v = document.createElement('video');
+  v.muted = true; v.loop = true; v.playsInline = true;
+  v.setAttribute('muted', ''); v.setAttribute('playsinline', ''); v.setAttribute('aria-hidden', 'true');
+  v.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;bottom:0;left:0';
+  for (const [src, type] of [['/keep-awake.webm', 'video/webm'], ['/keep-awake.mp4', 'video/mp4']]) {
+    const el = document.createElement('source'); el.src = src; el.type = type; v.appendChild(el);
+  }
+  v.addEventListener('playing', () => { wake.videoOn = true; renderWakeChip(); });
+  v.addEventListener('pause', () => { wake.videoOn = false; renderWakeChip(); });
+  document.body.appendChild(v);
+  wake.video = v;
+  return v;
+}
+async function startVideoFallback() {
+  if (!wake.wanted || wake.videoOn || document.visibilityState !== 'visible') return;
+  const v = wakeVideo();
+  try { await v.play(); wake.videoOn = !v.paused; } catch { wake.failed = true; }
+  renderWakeChip();
+}
+async function requestWake(fromTap = false) {
+  if (!wake.wanted || document.visibilityState !== 'visible') return;
+  if (!wake.lock && !wake.pending && 'wakeLock' in navigator) {
+    wake.pending = true;
+    try {
+      wake.lock = await navigator.wakeLock.request('screen');
+      wake.lock.addEventListener('release', () => { wake.lock = null; renderWakeChip(); if (document.visibilityState === 'visible') requestWake(); });
+      wake.failed = false;
+      if (wake.video && wake.videoOn) wake.video.pause(); // the real lock is better for battery
+    } catch { wake.failed = true; }
+    wake.pending = false;
+  }
+  if (!wake.lock && fromTap) await startVideoFallback();
+  renderWakeChip();
 }
 function keepAwake(on) {
-  if (on === wake.wanted) { if (on) requestWake(); return; }
+  if (on === wake.wanted) { if (on && !wakeActive()) requestWake(); return; }
   wake.wanted = on;
   if (on) requestWake();
-  else if (wake.lock) { wake.lock.release().catch(() => {}); wake.lock = null; }
+  else {
+    if (wake.lock) { wake.lock.release().catch(() => {}); wake.lock = null; }
+    if (wake.video) wake.video.pause();
+  }
+  renderWakeChip();
 }
-document.addEventListener('visibilitychange', requestWake);
-document.addEventListener('pointerdown', requestWake, true); // some browsers only allow it after a tap
+// The chip is outside the normal render so it can update without redrawing the page.
+function renderWakeChip() {
+  const el = document.getElementById('wake-chip');
+  if (!el) return;
+  const show = wake.wanted && !wakeActive() && !wake.pending;
+  el.hidden = !show;
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!socket.connected) socket.connect(); // back from a locked screen: reconnect straight away
+  requestWake();
+});
+document.addEventListener('pointerdown', () => { if (wake.wanted && !wakeActive()) requestWake(true); }, true);
 
 // ---------- staying up to date ----------
 const MY_BUILD = document.querySelector('meta[name="bd-build"]')?.content || '';
@@ -386,8 +446,13 @@ const actions = {
     state.form.cap = Math.max(3, Math.min(max, Number(state.form.cap) + Number(el.dataset.step)));
     render();
   },
+  wakeTap() { requestWake(true); },
   tip() { state.tipOpen = !state.tipOpen; render(); },
   async cancelRequest() { await emit('cancelRequest'); notice('Request cancelled', 'You can ask to join another game any time.'); },
+  async copyCode() {
+    try { await navigator.clipboard.writeText(state.view.code); toast('Code copied', true); }
+    catch { toast(`The code is ${state.view.code}`); }
+  },
   async copyLink() {
     const url = roomLink(state.view.id);
     try { await navigator.clipboard.writeText(url); toast('Link copied', true); }
@@ -572,6 +637,11 @@ function roomSettingsFromForm(f) {
 function saveRoomSettings() { store.set('bd-room-settings', JSON.stringify(roomSettingsFromForm(state.form))); state.roomSaved = true; }
 
 const forms = {
+  async joinCode() {
+    const code = String(state.form.joinCode || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (code.length !== 6) { state.codeError = 'Codes are 6 letters and numbers.'; render(); return; }
+    if (await openCode(code)) state.form.joinCode = '';
+  },
   async bidAmount(form) {
     const n = Number(form.querySelector('#bid-amount').value);
     if (!Number.isInteger(n) || n <= 0) { toast('Type a whole number.'); return; }
@@ -692,7 +762,14 @@ function homeScreen() {
         <button class="btn btn-ghost btn-block" data-action="browse">Find a public game</button>
         ${state.config.pool ? html`<button class="btn btn-ghost btn-block" data-action="openPool">Community pool</button>` : ''}
       </div>
-      <p class="hero-foot">Got an invite link? Open it to join your friends.</p>
+      <form data-form="joinCode" class="code-form" novalidate>
+        <label for="join-code" class="code-label">Got a game code?</label>
+        <div class="code-row">
+          <input type="text" id="join-code" data-field="joinCode" value="${state.form.joinCode}" maxlength="7" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="e.g. K7MX2Q" aria-describedby="code-help">
+          <button class="btn btn-primary" type="submit">Join</button>
+        </div>
+        ${state.codeError ? html`<p class="error-text" role="alert">${state.codeError}</p>` : html`<p class="hero-foot" id="code-help">Or open the invite link, or scan the QR code on the host’s screen.</p>`}
+      </form>
       <p class="hero-foot"><a href="/contact" data-action="contactPage">Contact the admin</a></p>
     </section>`;
 }
@@ -1146,6 +1223,15 @@ function lobbyScreen(v) {
     <div class="stack">
       <section class="panel">
         <h3>Invite players</h3>
+        ${v.code ? html`<div class="code-share">
+          <div class="code-box">
+            <span class="label">Game code</span>
+            <span class="code-big" aria-label="Game code ${v.code.split('').join(' ')}">${v.code}</span>
+            <button class="btn btn-small" data-action="copyCode">Copy code</button>
+            <p class="hint">Friends tap “Got a game code?” on the home page.</p>
+          </div>
+          <figure class="qr"><img src="/qr/${v.id}.svg" alt="QR code for this game’s invite link" width="148" height="148"><figcaption>Scan to join</figcaption></figure>
+        </div>` : ''}
         <div class="invite">
           <input type="text" id="invite-link" value="${link}" readonly aria-label="Invite link">
           <button class="btn btn-small" data-action="copyLink">Copy</button>
@@ -2025,7 +2111,8 @@ function render() {
   const wheelPhase = state.screen === 'room' && ['draft', 'endphase', 'auction'].includes(state.view?.phase);
   $app.classList.toggle('wide-trade', state.screen === 'room' && state.view?.phase === 'trade');
   $app.classList.toggle('wide', wheelPhase);
-  $app.innerHTML = fmt(html`${state.screen === 'room' || state.newVersion ? offlineBar() : ''}${body}`);
+  $app.innerHTML = fmt(html`${state.screen === 'room' || state.newVersion ? offlineBar() : ''}${state.screen === 'room' ? html`<button class="wake-chip" id="wake-chip" data-action="wakeTap" hidden>Tap to keep your screen on</button>` : ''}${body}`);
+  renderWakeChip();
   if (wheelPhase) syncWheel(state.view);
   tickCountdown();
   if (key) {

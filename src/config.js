@@ -9,6 +9,7 @@ export const NAME_MAX = 20;
 export const ROLE_NAME_MAX = 30;
 export const ROOM_NAME_MAX = 40;
 export const GRACE_MS = 30_000; // R6.8: every disconnected player gets 30 seconds
+export const LOBBY_HOLD_MS = 5 * 60_000; // a player who drops in the lobby keeps their place this long (26 Oct 2026)
 export const EMPTY_ROOM_TTL_MS = 10 * 60_000; // drop rooms nobody is in
 
 // Minimum character list (R5.6): (players x roles + 3 per player) plus 10%, rounded up.

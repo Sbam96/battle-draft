@@ -183,3 +183,17 @@ test('BUG 4: only the host can close voting early', () => {
   }
   assert.fail('setup not found');
 });
+
+// ---------- 26 Oct: phones locking in the lobby ----------
+test('WK4 starting the game leaves out anyone whose phone is still locked (they can join the next game)', () => {
+  const r = new Room({ id: 'r', hostName: 'Host', hostToken: 'th', settings: { roomName: 'R', visibility: 'private', roleCount: 5, roles: ['A', 'B', 'C', 'D', 'E'], cap: 8, turnOrder: 'join' } });
+  r.join('t2', 'P2'); r.join('t3', 'P3'); r.join('t4', 'Sleepy');
+  r.addCharacters(r.hostId, { text: names.join('\n') });
+  const sleepy = r.players.find((p) => p.name === 'Sleepy').id;
+  r.disconnect(sleepy, T0);
+  assert.equal(r.expireGrace(sleepy, { removeFromLobby: false }), true);
+  assert.ok(r.player(sleepy), 'kept in the lobby');
+  r.start(r.hostId, Math.random, T0);
+  assert.equal(r.player(sleepy), undefined);
+  assert.equal(r.draft.order.length, 3);
+});

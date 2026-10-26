@@ -11,8 +11,9 @@ import { mountAdmin } from './admin.js';
 import { mountPool } from './poolRoutes.js';
 import { PoolStore, PoolError } from './pool.js';
 import { openDb } from './db.js';
-import { roomId } from './ids.js';
-import { GRACE_MS, EMPTY_ROOM_TTL_MS, maxPlayersFor, PLACEMENT_TIMER_OPTIONS, VOTE_TIMER_OPTIONS, FUNDS_OPTIONS, CURRENCIES } from './config.js';
+import { roomId, joinCode, normaliseCode } from './ids.js';
+import QRCode from 'qrcode';
+import { GRACE_MS, LOBBY_HOLD_MS, EMPTY_ROOM_TTL_MS, maxPlayersFor, PLACEMENT_TIMER_OPTIONS, VOTE_TIMER_OPTIONS, FUNDS_OPTIONS, CURRENCIES } from './config.js';
 
 // The database address can be an environment variable or a Render "Secret File"
 // (Render puts secret files in /etc/secrets). Any secret file holding a postgres:// address works.
@@ -70,6 +71,7 @@ const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..',
 
 export function createApp({
   graceMs = GRACE_MS,
+  lobbyHoldMs = LOBBY_HOLD_MS,
   emptyRoomTtlMs = EMPTY_ROOM_TTL_MS,
   admin = { username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD },
   db = null, // an open database for the community pool, or null to run without it
@@ -85,6 +87,7 @@ export function createApp({
   const graceTimers = new Map(); // `${roomId}:${playerId}` -> timeout
   const emptyTimers = new Map(); // roomId -> timeout
   const turnTimers = new Map(); // roomId -> timeout for the current turn's deadline or inactivity skip
+  const codeTries = new Map(); // address -> { count, until }: wrong join codes
 
   app.disable('x-powered-by');
   app.set('trust proxy', 1); // Render sits in front: use the real client address and https flag
@@ -99,11 +102,20 @@ export function createApp({
     .replace('/styles.css"', `/styles.css?v=${BUILD}"`)
     .replace('/app.js"', `/app.js?v=${BUILD}"`);
   const sendIndex = (req, res) => { res.setHeader('Cache-Control', 'no-cache'); res.type('html').send(indexHtml); };
-  app.get(['/', '/index.html', '/r/:id', '/pool', '/contact'], sendIndex);
+  app.get(['/', '/index.html', '/r/:id', '/j/:code', '/pool', '/contact'], sendIndex);
   app.use(express.static(PUBLIC_DIR, { index: false, setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
   app.get('/config', (req, res) => res.json({ maxPlayers: { 5: maxPlayersFor(5), 10: maxPlayersFor(10) }, timerOptions: PLACEMENT_TIMER_OPTIONS, voteTimerOptions: VOTE_TIMER_OPTIONS, fundsOptions: FUNDS_OPTIONS, currencies: CURRENCIES, pool: Boolean(pool()) }));
   mountPool(app, { pool });
   app.get('/health', (req, res) => res.json({ ok: true, rooms: rooms.size }));
+  // QR code for a room's invite link (26 Oct 2026). Only for rooms that exist.
+  app.get('/qr/:id.svg', async (req, res) => {
+    const room = rooms.get(String(req.params.id));
+    if (!room) { res.status(404).end(); return; }
+    const link = `${req.protocol}://${req.get('host')}/r/${room.id}`;
+    const svg = await QRCode.toString(link, { type: 'svg', margin: 1, errorCorrectionLevel: 'M', color: { dark: '#1b1530', light: '#ffffff' } });
+    res.setHeader('Cache-Control', 'no-store');
+    res.type('image/svg+xml').send(svg);
+  });
   app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
   // Iteration 2 mock-up (not linked from the game): try the auction against computer bidders.
   app.get('/preview/auction', (req, res) => { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(path.join(PUBLIC_DIR, 'preview-auction.html')); });
@@ -159,7 +171,14 @@ export function createApp({
     clearTimeout(graceTimers.get(key));
     graceTimers.set(key, setTimeout(() => {
       graceTimers.delete(key);
-      if (room.expireGrace(playerId)) { broadcast(room); scheduleEmptyCheck(room); }
+      // In the lobby the player keeps their place for longer (a locked phone shouldn't cost them their seat).
+      if (room.expireGrace(playerId, { removeFromLobby: false })) { broadcast(room); scheduleEmptyCheck(room); }
+      if (room.phase === 'lobby') {
+        graceTimers.set(key, setTimeout(() => {
+          graceTimers.delete(key);
+          if (room.dropAwayFromLobby(playerId)) { broadcast(room); scheduleEmptyCheck(room); }
+        }, Math.max(0, lobbyHoldMs - graceMs)).unref());
+      }
     }, graceMs).unref());
   }
 
@@ -229,9 +248,30 @@ export function createApp({
       };
     });
 
+    // Join by code (26 Oct 2026). Wrong codes are limited per address so codes can't be guessed.
+    on('findCode', ({ code }) => {
+      // Render's proxy adds the real address last in X-Forwarded-For; anything before it could be made up.
+      const ip = String(socket.handshake.headers['x-forwarded-for'] || '').split(',').pop().trim() || socket.handshake.address || 'unknown';
+      const now = Date.now();
+      const tries = codeTries.get(ip);
+      if (tries && tries.until > now && tries.count >= 12) throw new GameError('TOO_MANY_TRIES', 'Too many wrong codes. Wait a few minutes and try again.');
+      const want = normaliseCode(code);
+      const room = want.length === 6 ? [...rooms.values()].find((r) => r.code === want) : null;
+      if (!room) {
+        const t = tries && tries.until > now ? tries : { count: 0, until: now + 10 * 60_000 };
+        t.count += 1;
+        codeTries.set(ip, t);
+        throw new GameError('CODE_NOT_FOUND', 'No game has that code. Check it with the host; codes are 6 letters and numbers.');
+      }
+      return { roomId: room.id };
+    });
+
     on('create', ({ settings, name, token }) => {
       const id = roomId();
       const room = new Room({ id, settings, hostName: name, hostToken: String(token || '') });
+      let code = joinCode();
+      while ([...rooms.values()].some((r) => r.code === code)) code = joinCode();
+      room.code = code;
       rooms.set(id, room);
       attach(socket, room, room.host);
       broadcast(room);
