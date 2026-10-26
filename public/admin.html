@@ -28,7 +28,8 @@
     .imgs figcaption { font-size: 0.8rem; overflow-wrap: anywhere; margin-top: 6px; }
     .stats { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); margin-bottom: 14px; font-weight: 700; }
     .empty { color: var(--muted); }
-    .dup-group { border-left: 4px solid #e0a800; padding-left: 8px; margin-bottom: 12px; }
+    .tier-pick { font: inherit; font-size: 0.85rem; padding: 2px 4px; margin-right: 6px; }
+  .dup-group { border-left: 4px solid #e0a800; padding-left: 8px; margin-bottom: 12px; }
 </style>
 </head>
 <body>
@@ -180,8 +181,15 @@
         }
         const list = el('ul', { class: 'list' }, el('li', {}, 'Loading…'));
         const dups = el('div', {});
+        const tierPick = (ch) => {
+          const sel = el('select', { 'aria-label': `Tier for ${ch.name}`, class: 'tier-pick', onchange: async () => { await call('PATCH', `/admin/api/pool/characters/${ch.id}`, { tier: sel.value }); } },
+            ...(ch.tier ? [] : [el('option', { value: '' }, 'No tier')]),
+            ...['Diamond', 'Gold', 'Silver', 'Bronze'].map((t) => { const o = el('option', { value: t }, t); if (t === ch.tier) o.selected = true; return o; }));
+          return sel;
+        };
         const row = (ch) => el('li', {},
           el('span', { class: 'grow' }, ch.name, ch.image ? el('small', { class: 'hint' }, ' · ', safeLink(ch.image)) : null),
+          tierPick(ch),
           btn('Remove', async () => { if (confirm(`Remove ${ch.name} from ${verse.name}?`)) { await call('DELETE', `/admin/api/pool/characters/${ch.id}`); refresh(); } }, 'btn btn-small btn-danger'));
         const refresh = () => call('GET', `/admin/api/pool/verses/${verse.id}`).then(({ characters, duplicates = [] }) => {
           dups.replaceChildren(...(duplicates.length ? [

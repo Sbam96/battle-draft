@@ -473,6 +473,7 @@ const actions = {
   },
   charTab(el) { state.charTabChosen = true; state.charTab = el.dataset.tab; state.importResult = null; render(); },
   dismissResult() { state.importResult = null; render(); },
+  async setTier(el) { const r = await emit('setTier', { id: el.dataset.id, tier: el.value }); if (!r.ok) toast(r.message); },
   async removeChar(el) { const r = await emit('removeCharacter', { id: el.dataset.id }); if (!r.ok) toast(r.message); },
   askClear(el) { state.confirmClear = el.dataset.verse ?? '*'; render(); },
   cancelClear() { state.confirmClear = null; render(); },
@@ -778,6 +779,8 @@ function poolResultBox() {
   return html`<div class="result" role="status">
     <p><strong>${r.added.length ? `Added ${plural2(r.added.length, 'character')}` : 'No new characters added'}</strong> to ${r.verse.name}${r.fileName ? html` from ${r.fileName}` : ''}.</p>
     ${r.imagesAdded.length ? html`<p>Image added to ${r.imagesAdded.join(', ')}.</p>` : ''}
+    ${r.tiersSet?.length ? html`<p>Tier set for ${plural2(r.tiersSet.length, 'character')}.</p>` : ''}
+    ${r.tiersKept?.length ? html`<p class="hint">${plural2(r.tiersKept.length, 'character')} already had a different tier, so it was left as it is. Only the admin can change a tier once it’s set.</p>` : ''}
     ${r.imageRequests.length ? html`<p class="dup-head">${r.imageRequests.length === 1 ? `${r.imageRequests[0]} already has an image` : `${plural2(r.imageRequests.length, 'character')} already have images`}. Your link was sent to the admin to decide which to keep.</p>
       ${r.imageRequests.length > 1 ? html`<ul class="dups">${r.imageRequests.slice(0, 12).map((d) => html`<li class="dup">${d}</li>`)}</ul>` : ''}` : ''}
     ${r.duplicates.length ? html`<p class="dup-head">Already in the pool (${r.duplicates.length}):</p>
@@ -842,7 +845,7 @@ function poolScreen() {
       <button class="back" style="color:var(--muted)" data-action="allVerses">‹ All verses</button>
       <input type="text" data-field="poolSearch" value="${state.form.poolSearch}" placeholder="Search ${verse.name}" aria-label="Search characters" autocomplete="off">
       <div class="char-scroll" tabindex="0" aria-label="Characters in ${verse.name}">
-        <ul class="char-list">${shown.map((c) => html`<li><span>${c.name}</span>${c.image ? html`<span class="badge you" title="Has an image">Image</span>` : ''}</li>`)}</ul>
+        <ul class="char-list">${shown.map((c) => html`<li><span class="tname tier-${c.tier || 'Bronze'}">${c.name}</span>${c.image ? html`<span class="badge you" title="Has an image">Image</span>` : ''}${c.tier ? tierBadge(c.tier) : html`<span class="hint">No tier</span>`}</li>`)}</ul>
         ${!shown.length ? html`<p class="hint empty">${p.characters.length ? `No characters match “${state.form.poolSearch}”.` : 'Loading…'}</p>` : ''}
       </div>
     </section>`;
@@ -972,7 +975,11 @@ function characterList(v) {
               <button class="btn btn-small btn-danger" data-action="clearChars">Remove all ${chars.length}</button>
               <button class="btn btn-small" data-action="cancelClear">Cancel</button></span>`
             : html`<button class="btn btn-small" data-action="askClear" data-verse="${verse}">Remove list</button>`) : ''}</div>` : ''}
-        <ul class="char-list">${chars.map((c) => html`<li><span>${c.name}</span>${v.isHost ? html`<button class="x" data-action="removeChar" data-id="${c.id}" aria-label="Remove ${c.name}">×</button>` : ''}</li>`)}</ul>`)
+        <ul class="char-list">${chars.map((c) => html`<li><span class="tname tier-${c.tier || 'Bronze'}">${c.name}</span>
+          ${v.isHost
+            ? html`<select class="tier-select tier-${c.tier || 'Bronze'}" data-change="setTier" data-id="${c.id}" aria-label="Tier for ${c.name}">${TIER_NAMES.map((t) => html`<option value="${t}" ${raw(t === (c.tier || 'Bronze') ? 'selected' : '')}>${t}</option>`)}</select>
+              <button class="x" data-action="removeChar" data-id="${c.id}" aria-label="Remove ${c.name}">×</button>`
+            : tierBadge(c.tier || 'Bronze')}</li>`)}</ul>`)
       : html`<p class="hint empty">No characters match “${state.form.charSearch}”.</p>`}
     </div>
     ${v.isHost && !multi ? (state.confirmClear === '*' ? html`<div class="row-actions clear-row">
@@ -1133,6 +1140,10 @@ function missingCharacter() {
   state.lastCharRefetch = now;
   emit('getCharacters').then((r) => { if (r.ok && r.list) { state.characters = { version: r.version, list: r.list }; render(); } });
 }
+// Tier lookup (R15.2): the full list first, then the tiers sent with every update. Bronze if unknown.
+const TIER_NAMES = ['Diamond', 'Gold', 'Silver', 'Bronze'];
+const tierOf = (id) => charById().get(id)?.tier || state.view?.charTiers?.[id] || 'Bronze';
+const tierBadge = (tier) => html`<span class="tier-badge tier-${tier}">${tier}</span>`;
 // Name lookup: the full list first, then the names the server sends with every update.
 const charName = (id) => {
   const c = charById().get(id);
@@ -1164,10 +1175,12 @@ function charCard(id, label, { selectable = false, choice = '', selected = false
     ${label ? html`<span class="card-label">${label}</span>` : ''}
     ${showImg ? html`<img src="${c.image}" alt="" referrerpolicy="no-referrer">` : ''}
     <span class="card-name">${charName(id)}</span>
+    ${tierBadge(tierOf(id))}
     ${c?.verse ? html`<span class="card-verse">${c.verse}</span>` : ''}`;
+  const tier = `tier-${tierOf(id)}`;
   return selectable
-    ? html`<button class="char-card selectable ${selected ? 'selected' : ''}" data-action="pickKeep" data-choice="${choice}" aria-pressed="${selected}">${inner}</button>`
-    : html`<div class="char-card">${inner}</div>`;
+    ? html`<button class="char-card ${tier} selectable ${selected ? 'selected' : ''}" data-action="pickKeep" data-choice="${choice}" aria-pressed="${selected}">${inner}</button>`
+    : html`<div class="char-card ${tier}">${inner}</div>`;
 }
 
 function formation(v, pid, { interactive = false, compact = false } = {}) {
@@ -1181,7 +1194,7 @@ function formation(v, pid, { interactive = false, compact = false } = {}) {
         <span class="slot-role">${role}</span>
         ${canPlace
           ? html`<button class="btn btn-small btn-primary place-btn" data-action="placeRole" data-role="${i}">Place here</button>`
-          : html`<span class="slot-char">${id == null ? 'Empty' : charName(id)}</span>`}
+          : html`<span class="slot-char">${id == null ? 'Empty' : html`<span class="tname tier-${tierOf(id)}">${charName(id)}</span>`}</span>`}
       </li>`;
     })}</ol>`;
 }

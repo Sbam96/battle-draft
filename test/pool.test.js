@@ -145,6 +145,27 @@ test('P14b the admin sees possible duplicates already in a verse, to tidy up', {
   assert.ok(names.some((n) => n.includes('Goku') && n.includes('Kakarot')), names.join('; '));
   assert.ok(names.some((n) => n.includes('Vegeta') && n.includes('Ultra Ego')), 'bracketed variants are listed for a person to check');
 });
+test('T15.08 contributor adds characters with tiers; loading a verse brings them', { skip }, async () => {
+  const res = await store.addCharacters('ste_96', { verseName: 'Tier Test', source: 'csv', text: 'Name,Image,Tier\nGol D. Roger,https://x.y/r.png,Diamond\nNami,,Silver\nBuggy' });
+  assert.equal(res.added.length, 3);
+  const [g] = await store.charactersForVerses([res.verse.id]);
+  assert.deepEqual(Object.fromEntries(g.characters.map((c) => [c.name, c.tier])), { Buggy: 'Bronze', 'Gol D. Roger': 'Diamond', Nami: 'Silver' });
+});
+test('T15.08a an existing character with no tier gets one from an upload; one with a tier keeps it', { skip }, async () => {
+  const first = await store.addCharacters('ste_96', { verseName: 'Tier Test 2', text: 'Zoro\nSanji, Gold' });
+  const res = await store.addCharacters('ste_96', { verseId: first.verse.id, text: 'Zoro, Gold\nSanji, Silver' });
+  assert.deepEqual(res.tiersSet, ['Zoro']);
+  assert.deepEqual(res.tiersKept, ['Sanji']);
+  const tiers = Object.fromEntries((await store.verseCharacters(first.verse.id)).map((c) => [c.name, c.tier]));
+  assert.deepEqual(tiers, { Sanji: 'Gold', Zoro: 'Gold' });
+});
+test('T15.09 the admin changes a tier; a made-up tier is refused', { skip }, async () => {
+  const first = await store.addCharacters('ste_96', { verseName: 'Tier Test 3', text: 'Usopp, Bronze' });
+  const [c] = await store.verseCharacters(first.verse.id);
+  await store.setTier(c.id, 'Silver');
+  assert.equal((await store.verseCharacters(first.verse.id))[0].tier, 'Silver');
+  assert.equal(await code(store.setTier(c.id, 'Mythic')), 'BAD_TIER');
+});
 test('P15 unsafe links are dropped; the name is still added', { skip }, async () => {
   const res = await store.addCharacters('ste_96', { verseId: await verseId('Bleach'), source: 'csv', text: 'Nelliel Tu Odelschwanck,javascript:alert(1)' });
   assert.deepEqual(res.added, ['Nelliel Tu Odelschwanck']);

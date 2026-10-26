@@ -8,6 +8,7 @@
 
 import { nameKey } from './db.js';
 import { identityKey, possibleDuplicates } from './aliases.js';
+import { isTier, tierOrDefault } from './tiers.js';
 import { parseText, CHAR_NAME_MAX } from './characters.js';
 import { isProfane } from './profanity.js';
 import { MAX_CHARACTERS } from './config.js';
@@ -59,8 +60,8 @@ export class PoolStore {
 
   async verseCharacters(verseId) {
     const { rows } = await this.db.query(
-      'SELECT id, name, image_url FROM pool_characters WHERE verse_id = $1 ORDER BY lower(name)', [Number(verseId)]);
-    return rows.map((r) => ({ id: r.id, name: r.name, image: r.image_url }));
+      'SELECT id, name, image_url, tier FROM pool_characters WHERE verse_id = $1 ORDER BY lower(name)', [Number(verseId)]);
+    return rows.map((r) => ({ id: r.id, name: r.name, image: r.image_url, tier: r.tier }));
   }
 
   // For loading into a game: [{ verse, characters: [{ name, image }] }]
@@ -68,13 +69,13 @@ export class PoolStore {
     const ids = [...new Set((verseIds || []).map(Number).filter(Number.isInteger))];
     if (!ids.length) throw new PoolError('NO_VERSES', 'Pick at least one verse.');
     const { rows } = await this.db.query(`
-      SELECT v.id AS verse_id, v.name AS verse, c.name, c.image_url
+      SELECT v.id AS verse_id, v.name AS verse, c.name, c.image_url, c.tier
       FROM verses v JOIN pool_characters c ON c.verse_id = v.id
       WHERE v.id = ANY($1::int[]) ORDER BY v.name, lower(c.name)`, [ids]);
     const byVerse = new Map();
     for (const r of rows) {
       if (!byVerse.has(r.verse_id)) byVerse.set(r.verse_id, { verse: r.verse, characters: [] });
-      byVerse.get(r.verse_id).characters.push({ name: r.name, image: r.image_url });
+      byVerse.get(r.verse_id).characters.push({ name: r.name, image: r.image_url, tier: tierOrDefault(r.tier) });
     }
     return [...byVerse.values()];
   }
@@ -128,10 +129,10 @@ export class PoolStore {
 
     return this.db.tx(async (client) => {
       const verse = await this.#findOrCreateVerse(client, { verseId, verseName }, identity);
-      const result = { verse: { id: verse.id, name: verse.name }, added: [], imagesAdded: [], imageRequests: [], duplicates: [], notes: parsed.notes };
+      const result = { verse: { id: verse.id, name: verse.name }, added: [], imagesAdded: [], imageRequests: [], tiersSet: [], tiersKept: [], duplicates: [], notes: parsed.notes };
       // Everything already in the verse, keyed so the same character under another name is caught
       // ("Shiliew" when "Shiryu" is there). Loaded once: a verse is at most a few hundred rows.
-      const { rows: current } = await client.query('SELECT id, name, image_url FROM pool_characters WHERE verse_id = $1 ORDER BY id', [verse.id]);
+      const { rows: current } = await client.query('SELECT id, name, image_url, tier FROM pool_characters WHERE verse_id = $1 ORDER BY id', [verse.id]);
       const inVerse = new Map();
       for (const r of current) { const ik = identityKey(r.name); if (!inVerse.has(ik)) inVerse.set(ik, r); }
       const seen = new Set();
@@ -143,23 +144,33 @@ export class PoolStore {
         const existing = inVerse.get(ik);
         if (!existing) {
           const { rows: ins } = await client.query(
-            `INSERT INTO pool_characters (verse_id, name, name_key, image_url, added_by) VALUES ($1, $2, $3, $4, $5)
+            `INSERT INTO pool_characters (verse_id, name, name_key, image_url, added_by, tier) VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT DO NOTHING RETURNING id`,
-            [verse.id, e.name, k, e.image || null, identity]);
+            [verse.id, e.name, k, e.image || null, identity, e.tier || null]);
           if (!ins.length) { result.duplicates.push(e.name); continue; }
-          inVerse.set(ik, { id: ins[0].id, name: e.name, image_url: e.image || null });
+          inVerse.set(ik, { id: ins[0].id, name: e.name, image_url: e.image || null, tier: e.tier || null });
           result.added.push(e.name);
-        } else if (e.image && !existing.image_url) {
+          continue;
+        }
+        // R15.4: a contributor can set a tier that hasn't been set yet; changing one is for the admin.
+        let changed = false;
+        if (e.tier && !existing.tier) {
+          await client.query('UPDATE pool_characters SET tier = $1 WHERE id = $2', [e.tier, existing.id]);
+          existing.tier = e.tier;
+          result.tiersSet.push(existing.name);
+          changed = true;
+        } else if (e.tier && existing.tier !== e.tier) result.tiersKept.push(existing.name);
+        if (!e.image || existing.image_url === e.image) {
+          if (!changed) result.duplicates.push(e.name);
+        } else if (!existing.image_url) {
           await client.query('UPDATE pool_characters SET image_url = $1 WHERE id = $2', [e.image, existing.id]);
           result.imagesAdded.push(existing.name);
-        } else if (e.image && existing.image_url !== e.image) {
+        } else {
           await client.query(
             `INSERT INTO image_requests (character_id, proposed_url, requested_by) VALUES ($1, $2, $3)
              ON CONFLICT (character_id, proposed_url) WHERE status = 'pending' DO NOTHING`,
             [existing.id, e.image, identity]);
           result.imageRequests.push(existing.name);
-        } else {
-          result.duplicates.push(e.name);
         }
       }
       return result;
@@ -241,6 +252,13 @@ export class PoolStore {
   async setHandled(table, id, handled = true) {
     if (!['messages', 'reports'].includes(table)) throw new PoolError('BAD_TABLE', 'Unknown list.');
     await this.db.query(`UPDATE ${table} SET handled = $2 WHERE id = $1`, [Number(id), Boolean(handled)]);
+  }
+
+  // Admin: change a pool character's tier (R15.4).
+  async setTier(id, tier) {
+    if (!isTier(tier)) throw new PoolError('BAD_TIER', 'Pick Diamond, Gold, Silver or Bronze.');
+    const { rowCount } = await this.db.query('UPDATE pool_characters SET tier = $1 WHERE id = $2', [tier, Number(id)]);
+    if (!rowCount) throw new PoolError('NO_CHARACTER', 'That character is no longer in the pool.', 404);
   }
 
   async deleteCharacter(id) {

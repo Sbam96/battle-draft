@@ -6,6 +6,7 @@ import {
   PLACEMENT_TIMER_OPTIONS, VOTE_TIMER_OPTIONS, maxPlayersFor, minimumPool,
 } from './config.js';
 import { parseText, mergeCharacters } from './characters.js';
+import { isTier, tierOrDefault } from './tiers.js';
 import { Draft, DraftError } from './draft.js';
 import { EndPhase } from './endphase.js';
 import { Faceoff } from './faceoff.js';
@@ -373,8 +374,20 @@ export class Room {
     this.#touch();
   }
 
+  // R15.5: the host can change a character's tier in the lobby.
+  setTier(byId, charId, tier) {
+    this.#requireHost(byId);
+    this.#requireLobby();
+    if (!isTier(tier)) throw new GameError('BAD_TIER', 'Pick Diamond, Gold, Silver or Bronze.');
+    const c = this.characters.find((x) => x.id === charId);
+    if (!c) throw new GameError('NO_CHARACTER', 'That character is no longer in the list.');
+    c.tier = tier;
+    this.charVersion += 1;
+    this.#touch();
+  }
+
   charactersPayload() {
-    return { version: this.charVersion, list: this.characters.map(({ id, name, image, verse }) => ({ id, name, image, verse })) };
+    return { version: this.charVersion, list: this.characters.map(({ id, name, image, verse, tier }) => ({ id, name, image, verse, tier: tierOrDefault(tier) })) };
   }
 
   // ---------- starting ----------
@@ -561,6 +574,7 @@ export class Room {
       poolForCap: minimumPool(this.settings.cap, this.settings.roleCount),
       draft: this.draft ? this.draft.view(Date.now()) : null,
       charNames: this.#referencedNames(),
+      charTiers: this.#referencedTiers(),
       end: this.endPhase ? this.endPhase.view() : null,
       faceoff: this.faceoff ? this.faceoff.view(playerId) : null,
       game: this.games || 1,
@@ -571,6 +585,13 @@ export class Room {
 
   // Names for every character the screens might show right now (landed, held, teams, bin, feed,
   // face-off), so a player's view never depends on their own copy of the full list.
+  // Tiers for the same characters, so cards show their tier colour on any page (R15.2).
+  #referencedTiers() {
+    const names = this.#referencedNames();
+    const byId = new Map(this.characters.map((c) => [c.id, c.tier]));
+    return Object.fromEntries(Object.keys(names).map((id) => [id, tierOrDefault(byId.get(id))]));
+  }
+
   #referencedNames() {
     if (!this.draft) return {};
     const byId = new Map(this.characters.map((c) => [c.id, c.name]));

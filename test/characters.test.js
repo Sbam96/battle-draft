@@ -33,13 +33,13 @@ test('T7.05 CSV upload, one per row', () => {
   assert.equal(r.characters[2].image, null);
 });
 test('R7.1 rows copied from a spreadsheet (tabs) are one character per row', () => {
-  assert.deepEqual(parseText(`Luffy\tOne Piece\t${IMG}\nGoku\tDragon Ball Z`).entries, [{ name: 'Luffy', image: IMG }, { name: 'Goku', image: null }]);
+  assert.deepEqual(parseText(`Luffy\tOne Piece\t${IMG}\nGoku\tDragon Ball Z`).entries, [{ name: 'Luffy', image: IMG, tier: null }, { name: 'Goku', image: null, tier: null }]);
 });
 
 // ---------- R7.3 working out the columns ----------
 test('T7.06 CSV with no headers', () => {
   const { entries } = parseText(`Luffy,${IMG}\nZoro,https://ex.com/z.png`, { source: 'csv' });
-  assert.deepEqual(entries, [{ name: 'Luffy', image: IMG }, { name: 'Zoro', image: 'https://ex.com/z.png' }]);
+  assert.deepEqual(entries, [{ name: 'Luffy', image: IMG, tier: null }, { name: 'Zoro', image: 'https://ex.com/z.png', tier: null }]);
 });
 test('T7.07 header row is skipped, not added as a character', () => {
   const { entries, notes } = parseText(`Name,Image URL\nLuffy,${IMG}`, { source: 'csv' });
@@ -50,7 +50,7 @@ test('R7.3 a character genuinely called “Character” in row 2 is kept', () =>
   assert.deepEqual(names('Luffy\nCharacter', 'csv'), ['Luffy', 'Character']);
 });
 test('T7.08 columns in reverse order (link first)', () => {
-  assert.deepEqual(parseText(`${IMG},Luffy`, { source: 'csv' }).entries, [{ name: 'Luffy', image: IMG }]);
+  assert.deepEqual(parseText(`${IMG},Luffy`, { source: 'csv' }).entries, [{ name: 'Luffy', image: IMG, tier: null }]);
 });
 test('T7.09 names only', () => assert.deepEqual(names('Luffy\nZoro', 'csv'), ['Luffy', 'Zoro']));
 test('T7.10 only some rows have links', () => {
@@ -75,7 +75,7 @@ test('T7.13 Excel file gets a “save as CSV” message', () => {
 
 // ---------- R7.2 tricky names ----------
 test('T7.14 quoted name containing a comma stays as one name', () => {
-  assert.deepEqual(parseText(`"Luffy, Monkey D.",${IMG}`, { source: 'csv' }).entries, [{ name: 'Luffy, Monkey D.', image: IMG }]);
+  assert.deepEqual(parseText(`"Luffy, Monkey D.",${IMG}`, { source: 'csv' }).entries, [{ name: 'Luffy, Monkey D.', image: IMG, tier: null }]);
   assert.deepEqual(names('"Luffy, Monkey D."\nZoro'), ['Luffy, Monkey D.', 'Zoro']);
 });
 test('R7.2 escaped quotes inside quoted names', () => assert.deepEqual(names('"The ""Pirate"" King"', 'csv'), ['The "Pirate" King']));
@@ -181,7 +181,7 @@ test('T5.16 more players join than the list supports: host warned before startin
 // ---------- link safety ----------
 test('T7.21 javascript: links are rejected; the name is kept without an image', () => {
   const { entries, notes } = parseText('Luffy,javascript:alert(1)', { source: 'csv' });
-  assert.deepEqual(entries, [{ name: 'Luffy', image: null }]);
+  assert.deepEqual(entries, [{ name: 'Luffy', image: null, tier: null }]);
   assert.equal(notes.unsafeLinks, 1);
 });
 test('NF5 data: and file: links are never used as images', () => {

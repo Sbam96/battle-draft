@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS pool_characters (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (verse_id, name_key)
 );
+-- R15.4 (26 Oct 2026): a tier per character. NULL means not set yet (played as Bronze).
+ALTER TABLE pool_characters ADD COLUMN IF NOT EXISTS tier TEXT;
 -- The approved list: anyone whose username or email is here can add to the pool.
 CREATE TABLE IF NOT EXISTS contributors (
   id SERIAL PRIMARY KEY,

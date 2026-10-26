@@ -7,6 +7,7 @@
 
 import { MAX_CHARACTERS } from './config.js';
 import { identityKey, normalise } from './aliases.js';
+import { tierFrom, tierOrDefault } from './tiers.js';
 
 export const CHAR_NAME_MAX = 60;
 export const URL_MAX = 2000;
@@ -50,7 +51,7 @@ export function parseText(text, { source = 'paste' } = {}) {
   }
   if (raw.length > TEXT_MAX) throw Object.assign(new Error('That list is too big. Keep it to 500 characters.'), { code: 'TOO_BIG' });
 
-  const notes = { blankRows: 0, headerSkipped: false, unsafeLinks: 0, longNames: 0, linksWithoutName: 0 };
+  const notes = { blankRows: 0, headerSkipped: false, unsafeLinks: 0, longNames: 0, linksWithoutName: 0, unknownTiers: 0 };
   const entries = [];
   // Strip a byte-order mark; a final line break isn't a blank row.
   const lines = raw.replace(/^﻿/, '').replace(/(\r\n|\r|\n)+$/, '').split(/\r\n|\r|\n/);
@@ -59,7 +60,7 @@ export function parseText(text, { source = 'paste' } = {}) {
     const cells = splitRow(line);
     if (!cells.length) { notes.blankRows += 1; return; }
     const parts = cells.map(classify);
-    const texts = parts.filter((p) => p.kind === 'text').map((p) => p.text);
+    let texts = parts.filter((p) => p.kind === 'text').map((p) => p.text);
     const urls = parts.filter((p) => p.kind === 'url').map((p) => p.url);
     notes.unsafeLinks += parts.filter((p) => p.kind === 'unsafe').length;
 
@@ -71,13 +72,19 @@ export function parseText(text, { source = 'paste' } = {}) {
 
     if (!texts.length) { if (urls.length) notes.linksWithoutName += 1; return; }
 
+    // A tier column (R15.3): any cell after the first that is a tier word, e.g. "Gol D. Roger, Diamond".
+    let tier = null;
+    const tierAt = texts.findIndex((t, i) => i > 0 && tierFrom(t));
+    if (tierAt > 0) { tier = tierFrom(texts[tierAt]); texts = texts.filter((_, i) => i !== tierAt); }
+    else if (source === 'csv' && texts.length > 1) notes.unknownTiers += 1; // an extra column that isn't a tier
+
     // A pasted comma row of plain names ("Luffy, Zoro, Nami") is several characters.
     // CSV files and tab-separated rows (copied from a spreadsheet) are one character per row.
     const names = source === 'paste' && !line.includes('\t') && !urls.length && texts.length > 1 ? texts : [texts[0]];
     const image = urls[0] && urls[0].length <= URL_MAX ? urls[0] : null;
     for (const name of names) {
       if (name.length > CHAR_NAME_MAX) { notes.longNames += 1; continue; }
-      entries.push({ name, image: names.length === 1 ? image : null });
+      entries.push({ name, image: names.length === 1 ? image : null, tier: names.length === 1 ? tier : null });
     }
   });
   return { entries, notes };
@@ -92,7 +99,7 @@ export function mergeCharacters(existing, entries, { verse = '' } = {}) {
   for (const e of entries) {
     const key = identityKey(e.name);
     if (seen.has(key)) { if (!duplicates.some((d) => normalise(d) === normalise(e.name))) duplicates.push(e.name); continue; }
-    const c = { name: e.name, image: e.image || null, verse };
+    const c = { name: e.name, image: e.image || null, verse, tier: tierOrDefault(e.tier) };
     seen.set(key, c);
     added.push(c);
   }

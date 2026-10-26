@@ -486,3 +486,23 @@ select:focus-visible { outline: 3px solid var(--pink); outline-offset: 1px; }
 /* Saved room settings (create screen) */
 .saved-settings { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .saved-settings .hint { flex-basis: 100%; margin: 0; }
+
+/* Character tiers (R15): Diamond, Gold, Silver, Bronze. Same colours in both themes: they are metals. */
+:root {
+  --tier-Diamond: #9fe7ff; --tier-Diamond-2: #e8fbff;
+  --tier-Gold: #f2c230; --tier-Gold-2: #fff1b8;
+  --tier-Silver: #c9d0da; --tier-Silver-2: #f4f6f9;
+  --tier-Bronze: #cd8a4f; --tier-Bronze-2: #f6dcc3;
+}
+.tier-Diamond { --t1: var(--tier-Diamond); --t2: var(--tier-Diamond-2); }
+.tier-Gold { --t1: var(--tier-Gold); --t2: var(--tier-Gold-2); }
+.tier-Silver { --t1: var(--tier-Silver); --t2: var(--tier-Silver-2); }
+.tier-Bronze { --t1: var(--tier-Bronze); --t2: var(--tier-Bronze-2); }
+.tier-badge { display: inline-block; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; padding: 1px 8px; border-radius: 999px; color: #1b1530; background: linear-gradient(135deg, var(--t1), var(--t2)); border: 2px solid #1b1530; white-space: nowrap; }
+.tier-badge.tier-Diamond::before { content: "◆ "; }
+.char-card[class*="tier-"] { border-color: var(--t1); box-shadow: 6px 6px 0 #000, inset 0 0 0 3px var(--t1); }
+.char-card .tier-badge { margin-top: 4px; }
+.tname[class*="tier-"] { border-bottom: 3px solid var(--t1); padding-bottom: 1px; }
+.tier-select { width: auto; flex: none; min-height: 0; font: inherit; font-size: 0.8rem; font-weight: 700; border: 2px solid #1b1530; border-radius: 999px; padding: 2px 6px; color: #1b1530; background: linear-gradient(135deg, var(--t1), var(--t2)); }
+.char-list li { gap: 8px; }
+.char-list li > .tname { flex: 1; min-width: 0; }

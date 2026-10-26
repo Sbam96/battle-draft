@@ -338,6 +338,13 @@ export function createApp({
       broadcast(room);
     });
 
+    on('setTier', ({ id, tier }) => {
+      const room = currentRoom();
+      room.setTier(socket.data.playerId, id, tier);
+      sendCharacters(room);
+      broadcast(room);
+    });
+
     on('clearCharacters', ({ verse }) => {
       const room = currentRoom();
       room.clearCharacters(socket.data.playerId, verse);
