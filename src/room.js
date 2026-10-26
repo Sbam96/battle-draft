@@ -491,6 +491,7 @@ export class Room {
         case 'bid': a.bid(playerId, payload.amount, now); break;
         case 'place': a.place(playerId, payload.area, payload.index, now); break;
         case 'move': a.move(playerId, payload.from, payload.to); break;
+        case 'sell': a.sell(playerId, payload.slot, now); break;
         default: throw new GameError('BAD_ACTION', 'Unknown action.');
       }
     });

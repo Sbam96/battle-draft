@@ -10,7 +10,7 @@
 
 import { randomInt } from 'node:crypto';
 import { DraftError, SPIN_MS } from './draft.js';
-import { TIER_PRICE, tierOrDefault } from './tiers.js';
+import { TIER_PRICE, tierOrDefault, sellPrice } from './tiers.js';
 import { BID_MS, BENCH_SPOTS } from './config.js';
 
 export const RESULT_MS = 2500; // how long a sold/unsold result shows before the next spin
@@ -157,6 +157,20 @@ export class Auction {
     const b = this.#slot(to?.area, to?.index);
     if (p[from.area][a] == null) throw new DraftError('EMPTY_SLOT', 'There’s nobody there to move.');
     [p[from.area][a], p[to.area][b]] = [p[to.area][b], p[from.area][a]];
+  }
+
+  // R17.7 (26 Oct: also allowed during the auction): sell to the market for half the tier price, rounded half up.
+  sell(pid, slot, now) {
+    const p = this.#player(pid);
+    const area = slot?.area; const i = Number(slot?.index);
+    if (!AREAS.includes(area) || !Number.isInteger(i) || i < 0 || i >= p[area].length || p[area][i] == null) throw new DraftError('BAD_SLOT', 'Pick a character to sell.');
+    const c = p[area][i];
+    const price = sellPrice(this.tierOf(c));
+    p[area][i] = null;
+    p.funds += price;
+    this.market.push(c);
+    this.#note({ kind: 'sold', playerId: pid, charId: c, amount: price }, now);
+    return price;
   }
 
   dueAt() { return this.finished ? null : this.deadline; }

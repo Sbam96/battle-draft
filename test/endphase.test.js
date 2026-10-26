@@ -18,7 +18,7 @@ function finishedDraft({ roleCount = 5, players = ['A', 'B', 'C'], binners = {},
   const timeouts = {};
   while (!d.finished) {
     const p = d.turn.playerId;
-    if ((timeouts[p] || 0) < (timeoutFor[p] || 0)) { timeouts[p] = (timeouts[p] || 0) + 1; d.timeout(T0); continue; }
+    if ((timeouts[p] || 0) < (timeoutFor[p] || 0)) { timeouts[p] = (timeouts[p] || 0) + 1; d.timeout(T0, 'inactive'); continue; }
     d.spin(p, T0);
     if ((binsUsed[p] || 0) < (binners[p] || 0)) { binsUsed[p] = (binsUsed[p] || 0) + 1; d.bin(p, T0); d.spin(p, T0); }
     d.place(p, d.teams.get(p).indexOf(null), T0);

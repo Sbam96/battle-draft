@@ -173,11 +173,32 @@ export class Draft {
 
   // R8.6: the turn is lost. A landed character goes back on the wheel; no re-spin is given.
   // A held character is placed in the first empty role so it isn't lost.
+  // Placement timer ran out (26 Oct 2026, both game modes): the system places for the player.
+  //  - Holding a character: the held one goes in the first empty role; a second spin goes back on the wheel.
+  //  - Landed: it goes in the first empty role.
+  //  - Not spun yet: the wheel is spun for them and the result goes in the first empty role.
+  // A disconnected player skipped after a minute (reason 'inactive') still loses the turn (R8.8).
   timeout(now, reason = 'timer') {
     const turn = this.turn;
     if (!turn) return false;
     const pid = turn.playerId;
     const team = this.teams.get(pid);
+    if (reason === 'timer' && turn.held == null) {
+      let autoSpun = false;
+      if (turn.landed == null && this.pool.length) {
+        turn.landed = this.pool[this.random(this.pool.length)];
+        this.pool = this.pool.filter((id) => id !== turn.landed);
+        this.spinCount += 1;
+        autoSpun = true;
+      }
+      const r = team.indexOf(null);
+      if (turn.landed != null && r !== -1) {
+        team[r] = turn.landed;
+        this.#note({ kind: 'autoPlaced', playerId: pid, charId: turn.landed, role: r, autoSpun }, now);
+        this.#endTurn(now);
+        return true;
+      }
+    }
     if (turn.held != null) {
       const r = team.indexOf(null);
       team[r] = turn.held;

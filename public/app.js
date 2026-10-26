@@ -757,7 +757,7 @@ function createScreen() {
           ${seg('hold', 'releasedHoldToBin', [['yes', 'Yes, bin them'], ['no', 'No, back on the wheel']], f.releasedHoldToBin)}</div>`}
         <div class="choice"><span class="label">Placement timer</span>
           ${seg('timer', 'timer', timerOpts, f.timer)}
-          <p class="hint" style="margin-top:6px">${auction ? 'Time to place a character you’ve won. If it runs out, they go in your first empty role, then the bench.' : 'If it runs out, the character goes back on the wheel and that turn is lost.'}</p></div>
+          <p class="hint" style="margin-top:6px">${auction ? 'Time to place a character you’ve won. If it runs out, they go in your first empty role, then the bench.' : 'If it runs out, the character is placed in your first empty role for you (and the wheel is spun for you if you haven’t spun).'}</p></div>
         <div class="choice"><span class="label">Voting timer</span>
           ${seg('vtimer', 'voteTimer', voteTimerOpts, f.voteTimer)}
           <p class="hint" style="margin-top:6px">Time to vote on each face-off match. Off: voting ends when everyone has voted, or when you close it.</p></div>
@@ -1298,6 +1298,7 @@ function logLine(v, e) {
     case 'keptNew': return html`${p} kept ${charName(e.charId)} as ${role(e.role)}. ${charName(e.released)} ${e.releasedTo === 'bin' ? 'went in the bin' : 'went back on the wheel'}.`;
     case 'keptHeld': return html`${p} kept ${charName(e.charId)} as ${role(e.role)}. ${charName(e.released)} went in the bin.`;
     case 'timeout': return html`${p} ${e.reason === 'inactive' ? 'was skipped after disconnecting' : 'ran out of time'}.${e.returned ? html` ${charName(e.returned)} went back on the wheel.` : ''}`;
+    case 'autoPlaced': return html`${p} ran out of time, so ${e.autoSpun ? html`the wheel was spun for them and ` : ''}${charName(e.charId)} went in as ${role(e.role)}.`;
     case 'timeoutHeld': return html`${p} ran out of time. Their held ${charName(e.charId)} went in as ${role(e.role)}.`;
     case 'removed': return html`${p} left the game. Their characters went back on the wheel.`;
     case 'swapped': return html`${p} swapped their ${role(e.roles[0])} and ${role(e.roles[1])}.`;
@@ -1589,7 +1590,7 @@ function squadPanel(v, { mode = '' } = {}) {
       const move = state.moveFrom
         ? html`<button class="btn btn-small ${moving ? 'btn-primary' : ''}" data-action="squadMove" data-area="${area}" data-i="${i}">${moving ? 'Cancel' : 'Move here'}</button>`
         : id ? html`<button class="btn btn-small" data-action="squadMove" data-area="${area}" data-i="${i}">Move</button>` : '';
-      const sell = mode === 'trade' && id && !state.moveFrom
+      const sell = (mode === 'trade' || mode === 'place') && id && !state.moveFrom
         ? (state.sellConfirm === key
           ? html`<button class="btn btn-small btn-danger" data-action="marketSell" data-area="${area}" data-i="${i}">Sell for ${money(v, sellFor(tierOf(id)))}</button>`
           : html`<button class="btn btn-small btn-ghost" data-action="askSell" data-key="${key}">Sell</button>`)
@@ -1634,7 +1635,7 @@ function marketPanel(v, { trade = false } = {}) {
       return html`<li>${chip(id)} <span class="hint">${money(v, price)}</span>
         ${trade ? html`<button class="btn btn-small" data-action="pickBuy" data-id="${id}" ${raw(canBuy && sq && sq.funds >= price ? '' : 'disabled')}>Buy</button>` : ''}</li>`;
     })}</ul>` : html`<p class="hint">Unsold and swapped-out characters land here.</p>`}
-    ${trade ? html`<p class="hint">${squadFull(v, v.you) ? `Bought ${v.trade.buys[v.you] || 0} of ${v.trade.buyLimit}.` : 'Only players with every role and bench spot filled can buy.'} Anyone can sell to the market for half the tier price.</p>` : ''}
+    ${trade ? html`<p class="hint">${squadFull(v, v.you) ? `Bought ${v.trade.buys[v.you] || 0} of ${v.trade.buyLimit}.` : 'Only players with every role and bench spot filled can buy.'} Anyone can sell to the market for half the tier price.</p>` : html`<p class="hint">You can sell from your squad for half the tier price at any time. Buying opens when the auction ends.</p>`}
   </div>`;
 }
 

@@ -417,3 +417,25 @@ test('R17.9 the host has no special trade powers beyond ending trading', () => {
   assert.equal(code(() => r.tradeAction(b, 'end', {}, t + TRADE_MIN_MS)), 'NOT_HOST');
 });
 test('RESULT_MS and SPIN_MS keep each lot moving', () => { assert.ok(RESULT_MS < 5000); assert.ok(SPIN_MS < 5000); });
+
+// ---------- 26 Oct changes ----------
+test('R17.7 selling to the market also works during the auction', () => {
+  const a = auction({ lotSize: 6 });
+  buyNow(a, 'A'); // c1, Diamond, for 7
+  const price = a.sell('A', { area: 'roles', index: 0 }, T0);
+  assert.equal(price, 4);
+  assert.equal(a.players.get('A').funds, 100 - 7 + 4);
+  assert.ok(a.market.includes('c1'));
+  assert.equal(a.players.get('A').roles[0], null);
+});
+test('R17.7 in a room: a player sells mid-auction over the auction action', () => {
+  const r = auctionRoom();
+  const a0 = r.players[0].id;
+  r.auctionAction(a0, 'bid', { amount: r.auction.minBid() }, r.auction.lot.opensAt);
+  r.tick(r.auction.deadline);
+  r.auctionAction(a0, 'place', { area: 'bench', index: 0 }, r.auction.deadline ?? T0);
+  const funds = r.auction.players.get(a0).funds;
+  r.auctionAction(a0, 'sell', { slot: { area: 'bench', index: 0 } }, T0);
+  assert.ok(r.auction.players.get(a0).funds > funds);
+  assert.equal(code(() => r.auctionAction(a0, 'sell', { slot: { area: 'bench', index: 0 } }, T0)), 'BAD_SLOT');
+});

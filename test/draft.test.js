@@ -192,15 +192,16 @@ test('T8.10 timer on: deadline set, and runs from after the spin animation', () 
   assert.equal(d.turn.deadline, T0 + 1000 + SPIN_MS + 30_000);
 });
 test('T8.11 timer off: no deadline', () => assert.equal(draft().turn.deadline, null));
-test('T8.13 / T8.14 timeout: character back on the wheel, turn lost, no extra spin', () => {
+test('T8.13 / T8.14 timer runs out after landing: placed in the first empty role for them (26 Oct)', () => {
   const d = draft({ timerSeconds: 30 });
   const landed = d.spin('A', T0);
   d.timeout(T0 + 40_000);
-  assert.ok(d.pool.includes(landed));
+  assert.equal(d.teams.get('A')[0], landed);
+  assert.ok(!d.pool.includes(landed));
   assert.equal(d.turn.playerId, 'B');
-  assert.equal(d.turnsTaken.get('A'), 1);
-  assert.equal(d.gaps('A'), 1);
+  assert.equal(d.gaps('A'), 0, 'no gap: the character was placed');
   assert.equal(d.binsLeft.get('A'), 1, 'a timeout does not cost a respin');
+  assert.equal(d.log.at(-1).kind, 'autoPlaced');
 });
 test('T8.15 timer runs out while holding: held character goes into the first empty role', () => {
   const d = draft({ timerSeconds: 30 });
@@ -220,23 +221,32 @@ test('R8.6 timeout after the second spin of a hold: held is placed, second goes 
 });
 test('T8.16 player with a gap: draft still ends normally', () => {
   const d = draft({ timerSeconds: 30 });
-  d.spin('A', T0); d.timeout(T0 + 99_000);
+  d.spin('A', T0); d.timeout(T0 + 99_000, 'inactive'); // a disconnected player's turn is still lost
   while (!d.finished) playTurn(d);
   assert.equal(d.gaps('A'), 1);
   assert.equal(d.teams.get('A').filter((x) => x === null).length, 1);
 });
-test('R8.6 timeout before spinning loses the turn and returns nothing', () => {
+test('R8.6 timer runs out before spinning: the wheel is spun for them and the result placed (26 Oct)', () => {
   const d = draft({ timerSeconds: 15 });
   const poolBefore = d.pool.length;
   d.timeout(T0 + 16_000);
-  assert.equal(d.pool.length, poolBefore);
+  assert.equal(d.pool.length, poolBefore - 1);
+  assert.ok(d.teams.get('A')[0]);
+  assert.equal(d.log.at(-1).autoSpun, true);
   assert.equal(d.turn.playerId, 'B');
+});
+test('R8.8 a disconnected player skipped for inactivity still loses the turn', () => {
+  const d = draft();
+  const landed = d.spin('A', T0);
+  d.timeout(T0 + 99_000, 'inactive');
+  assert.ok(d.pool.includes(landed));
+  assert.equal(d.gaps('A'), 1);
 });
 
 // ---------- R8.7 ----------
 test('T8.17 a character returned after a timeout can be landed again', () => {
   const d = draft({ timerSeconds: 30 });
-  const c = d.spin('A', T0); d.timeout(T0 + 99_000);
+  const c = d.spin('A', T0); d.timeout(T0 + 99_000, 'inactive');
   assert.equal(d.spin('B', T0), c);
 });
 

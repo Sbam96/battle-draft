@@ -244,7 +244,7 @@ test('T8.13 the server applies a timeout by itself when the timer runs out', asy
   room.draft.turn.deadline = Date.now() + 150; // shorten for the test
   await call(host, 'voteKick', { playerId: p3.last.you }); // any action that re-broadcasts
   await waitFor(() => p3.last.draft.turn?.playerId !== host.last.you, 3000);
-  assert.ok(p3.last.draft.log.some((e) => e.kind === 'timeout'));
+  assert.ok(p3.last.draft.log.some((e) => e.kind === 'autoPlaced'));
 });
 
 test('T8.22 vote-kick over the wire: the kicked player is told', async () => {

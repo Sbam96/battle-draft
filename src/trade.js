@@ -10,7 +10,6 @@
 //    can end trading for everyone after 90 seconds. The host can't approve or block trades.
 
 import { DraftError } from './draft.js';
-import { sellPrice } from './tiers.js';
 import { TRADE_MIN_MS, PROPOSAL_MS, MARKET_BUY_LIMIT, BENCH_SPOTS } from './config.js';
 
 const ints = (n) => Number.isInteger(n) && n >= 0;
@@ -138,15 +137,8 @@ export class TradePhase {
 
   sell(pid, slot, now) {
     this.#open();
-    const p = this.#player(pid);
-    const area = slot?.area; const i = Number(slot?.index);
-    if (!['roles', 'bench'].includes(area) || !Number.isInteger(i) || i < 0 || i >= p[area].length || p[area][i] == null) throw new DraftError('BAD_SLOT', 'Pick a character to sell.');
-    const c = p[area][i];
-    const price = sellPrice(this.a.tierOf(c));
-    p[area][i] = null;
-    p.funds += price;
-    this.a.market.push(c);
-    this.#note({ kind: 'sold', playerId: pid, charId: c, amount: price }, now);
+    this.#player(pid);
+    this.a.sell(pid, slot, now);
     this.#dropStale();
   }
 

@@ -369,6 +369,13 @@ export function createApp({
     }
 
     // Auction (iteration 2): socket name -> room action.
+    // Selling works in the auction and in the trade phase (26 Oct 2026).
+    on('marketSell', (payload) => {
+      const room = currentRoom();
+      if (room.phase === 'auction') room.auctionAction(socket.data.playerId, 'sell', payload || {});
+      else room.tradeAction(socket.data.playerId, 'sell', payload || {});
+      broadcast(room);
+    });
     for (const [ev, action] of [['auctionBid', 'bid'], ['auctionPlace', 'place'], ['squadMove', 'move']]) {
       on(ev, (payload) => {
         const room = currentRoom();
@@ -376,7 +383,7 @@ export function createApp({
         broadcast(room);
       });
     }
-    for (const [ev, action] of [['tradePropose', 'propose'], ['tradeCancel', 'cancel'], ['tradeRespond', 'respond'], ['marketBuy', 'buy'], ['marketSell', 'sell'], ['tradeDone', 'done'], ['tradeEnd', 'end']]) {
+    for (const [ev, action] of [['tradePropose', 'propose'], ['tradeCancel', 'cancel'], ['tradeRespond', 'respond'], ['marketBuy', 'buy'], ['tradeDone', 'done'], ['tradeEnd', 'end']]) {
       on(ev, (payload) => {
         const room = currentRoom();
         const result = room.tradeAction(socket.data.playerId, action, payload || {});
