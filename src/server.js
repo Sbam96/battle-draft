@@ -105,6 +105,8 @@ export function createApp({
   mountPool(app, { pool });
   app.get('/health', (req, res) => res.json({ ok: true, rooms: rooms.size }));
   app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
+  // Iteration 2 mock-up (not linked from the game): try the auction against computer bidders.
+  app.get('/preview/auction', (req, res) => { res.setHeader('Cache-Control', 'no-cache'); res.sendFile(path.join(PUBLIC_DIR, 'preview-auction.html')); });
   mountAdmin(app, { credentials: admin, reports, pool });
 
   // ---------- helpers ----------

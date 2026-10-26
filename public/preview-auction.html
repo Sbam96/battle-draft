@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <title>Battle Draft Auction Preview</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+  <style>
+    /* Auction preview: same world as the game (ink, paper, gold), plus the four tier metals. */
+    :root {
+      --diamond: #9fe7ff; --diamond-2: #e8fbff;
+      --gold-tier: #f2c230; --gold-tier-2: #fff1b8;
+      --silver: #c9d0da; --silver-2: #f4f6f9;
+      --bronze: #cd8a4f; --bronze-2: #f6dcc3;
+      --win: #2bb3a3;
+    }
+    .pv { max-width: 1180px; margin: 0 auto; padding-block: 18px 40px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+    .pv-banner { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+    .pv-banner h1 { font-family: var(--display); font-size: clamp(1.4rem, 5vw, 2rem); margin: 0; color: var(--gold); letter-spacing: 0.01em; }
+    .pv-banner p { margin: 0; color: var(--on-dark-muted); font-size: 0.9rem; }
+    .pv-tag { border: 2px solid var(--on-dark-muted); border-radius: 999px; padding: 1px 10px; font-size: 0.78rem; font-weight: 700; color: var(--on-dark-muted); }
+
+    .setup { max-width: 560px; }
+    .setup .panel { display: grid; gap: 16px; }
+    .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .field select, .field input { width: 100%; }
+    .pick { display: flex; flex-wrap: wrap; gap: 6px; }
+    .pick button { min-width: 52px; }
+    .pick button[aria-pressed="true"] { background: var(--ink); color: var(--gold); }
+
+    .grid { display: grid; gap: 18px; grid-template-columns: minmax(0, 1fr); }
+    @media (min-width: 900px) { .grid { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); align-items: start; } .left { position: sticky; top: 14px; } }
+    .left, .right { display: grid; gap: 16px; min-width: 0; }
+
+    .status { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+    .status span { border: 2px solid var(--on-dark-muted); border-radius: 999px; padding: 2px 12px; font-size: 0.85rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+    /* The lot card */
+    .lot { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 14px; align-items: center; color: var(--ink); background: var(--paper); border: 3px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px; }
+    .lot .pic { width: 112px; aspect-ratio: 3 / 4; border-radius: 8px; overflow: hidden; display: grid; place-items: center; background: var(--paper-2); border: 3px solid var(--tier-c, var(--line)); }
+    .lot .pic img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+    .lot h2 { font-family: var(--display); font-size: 1.25rem; margin: 4px 0 6px; line-height: 1.2; overflow-wrap: anywhere; }
+    .lot .open { margin: 0; color: var(--muted); font-size: 0.9rem; }
+    .bidline { margin: 8px 0 0; font-size: 1.05rem; font-variant-numeric: tabular-nums; }
+    .bidline strong { font-family: var(--display); font-size: 1.5rem; }
+    .lot.won { outline: 4px solid var(--win); }
+
+    .tier { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 10px; border-radius: 999px; color: #1b1530; background: linear-gradient(135deg, var(--tier-c), var(--tier-c2)); border: 2px solid #1b1530; }
+    .t-Diamond { --tier-c: var(--diamond); --tier-c2: var(--diamond-2); }
+    .t-Gold { --tier-c: var(--gold-tier); --tier-c2: var(--gold-tier-2); }
+    .t-Silver { --tier-c: var(--silver); --tier-c2: var(--silver-2); }
+    .t-Bronze { --tier-c: var(--bronze); --tier-c2: var(--bronze-2); }
+    .t-Diamond.tier::before { content: "◆"; }
+
+    .timer { height: 12px; border-radius: 999px; border: 2px solid var(--paper); overflow: hidden; }
+    .timer i { display: block; height: 100%; background: var(--gold); transition: width 0.2s linear; }
+    .timer.low i { background: var(--pink); }
+    .timer-label { text-align: center; font-size: 0.85rem; color: var(--on-dark-muted); margin: 4px 0 0; font-variant-numeric: tabular-nums; }
+
+    .bid-controls { display: grid; gap: 10px; }
+    .bid-controls .main { font-size: 1.15rem; padding-block: 14px; }
+    .amount { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+    .amount input { font-variant-numeric: tabular-nums; }
+    .hint.center { text-align: center; }
+
+    /* Squads */
+    .slots { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+    .slots li { display: grid; grid-template-columns: 40px 92px minmax(0, 1fr) auto; gap: 8px; align-items: center; min-height: 44px; padding: 4px 6px; border-radius: 8px; background: var(--paper-2); }
+    .slots li.bench { background: transparent; border: 2px dashed var(--muted); }
+    .slots .thumb { width: 40px; height: 40px; border-radius: 6px; overflow: hidden; background: var(--paper); border: 2px solid var(--tier-c, transparent); }
+    .slots .thumb img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+    .slots .role { font-size: 0.8rem; color: var(--muted); font-weight: 700; }
+    .slots .who { font-weight: 700; overflow-wrap: anywhere; color: var(--ink); }
+    .slots .who.empty { color: var(--muted); font-weight: 500; }
+    .slots .paid { font-variant-numeric: tabular-nums; font-size: 0.85rem; color: var(--muted); }
+    .slots button { padding: 4px 10px; }
+    .place-prompt { background: var(--gold); color: var(--ink); border-radius: 8px; padding: 8px 12px; font-weight: 700; margin: 0 0 10px; }
+
+    .players { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+    .players li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; }
+    .players .nm { font-weight: 700; }
+    .players .funds { font-variant-numeric: tabular-nums; font-weight: 700; }
+    .players .mini { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; }
+    .chipc { font-size: 0.75rem; padding: 1px 8px; border-radius: 999px; border: 2px solid #1b1530; background: linear-gradient(135deg, var(--tier-c), var(--tier-c2)); color: #1b1530; font-weight: 700; }
+    .chipc.bench { opacity: 0.6; border-style: dashed; }
+    .market { display: flex; flex-wrap: wrap; gap: 6px; }
+    .feed li { font-size: 0.92rem; }
+    .end h2 { font-family: var(--display); color: var(--gold); margin: 0 0 6px; }
+    .panel h3 { margin-top: 0; }
+    .left > *, .right > *, .setup .panel > * { margin-top: 0 !important; }
+    .players .mini:empty { display: none; }
+  </style>
+</head>
+<body>
+  <main class="pv" id="pv">
+    <header class="pv-banner">
+      <h1>Auction preview</h1>
+      <p><span class="pv-tag">Preview only</span> One Piece list, you against computer bidders. Nothing here is saved.</p>
+    </header>
+    <div id="view"><p>Loading characters…</p></div>
+  </main>
+  <script type="module" src="/preview-auction.js"></script>
+</body>
+</html>
