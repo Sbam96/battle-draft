@@ -13,7 +13,7 @@ export const URL_MAX = 2000;
 export const TEXT_MAX = 1_000_000; // ~1 MB of text is far more than 500 rows need
 
 const HEADER_WORDS = new Set(['name', 'names', 'character', 'characters', 'character name', 'image', 'images', 'image url', 'image link',
-  'url', 'link', 'links', 'picture', 'pic', 'photo', 'img', 'verse', 'anime', 'series', 'show']);
+  'url', 'link', 'links', 'picture', 'pic', 'photo', 'img', 'verse', 'anime', 'series', 'show', 'tier', 'tiers', 'rank', 'grade']);
 const UNSAFE_SCHEME = /^\s*(javascript|data|vbscript|file|blob):/i;
 
 export const nameKey = (name) => String(name).replace(/\s+/g, ' ').trim().toLowerCase();
