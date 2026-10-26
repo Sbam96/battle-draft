@@ -12,7 +12,7 @@ import { mountPool } from './poolRoutes.js';
 import { PoolStore, PoolError } from './pool.js';
 import { openDb } from './db.js';
 import { roomId } from './ids.js';
-import { GRACE_MS, EMPTY_ROOM_TTL_MS, maxPlayersFor, PLACEMENT_TIMER_OPTIONS, VOTE_TIMER_OPTIONS } from './config.js';
+import { GRACE_MS, EMPTY_ROOM_TTL_MS, maxPlayersFor, PLACEMENT_TIMER_OPTIONS, VOTE_TIMER_OPTIONS, FUNDS_OPTIONS, CURRENCIES } from './config.js';
 
 // The database address can be an environment variable or a Render "Secret File"
 // (Render puts secret files in /etc/secrets). Any secret file holding a postgres:// address works.
@@ -101,7 +101,7 @@ export function createApp({
   const sendIndex = (req, res) => { res.setHeader('Cache-Control', 'no-cache'); res.type('html').send(indexHtml); };
   app.get(['/', '/index.html', '/r/:id', '/pool', '/contact'], sendIndex);
   app.use(express.static(PUBLIC_DIR, { index: false, setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
-  app.get('/config', (req, res) => res.json({ maxPlayers: { 5: maxPlayersFor(5), 10: maxPlayersFor(10) }, timerOptions: PLACEMENT_TIMER_OPTIONS, voteTimerOptions: VOTE_TIMER_OPTIONS, pool: Boolean(pool()) }));
+  app.get('/config', (req, res) => res.json({ maxPlayers: { 5: maxPlayersFor(5), 10: maxPlayersFor(10) }, timerOptions: PLACEMENT_TIMER_OPTIONS, voteTimerOptions: VOTE_TIMER_OPTIONS, fundsOptions: FUNDS_OPTIONS, currencies: CURRENCIES, pool: Boolean(pool()) }));
   mountPool(app, { pool });
   app.get('/health', (req, res) => res.json({ ok: true, rooms: rooms.size }));
   app.get('/admin', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'admin.html')));
@@ -365,6 +365,23 @@ export function createApp({
         const room = currentRoom();
         room.endAction(socket.data.playerId, action, payload);
         broadcast(room);
+      });
+    }
+
+    // Auction (iteration 2): socket name -> room action.
+    for (const [ev, action] of [['auctionBid', 'bid'], ['auctionPlace', 'place'], ['squadMove', 'move']]) {
+      on(ev, (payload) => {
+        const room = currentRoom();
+        room.auctionAction(socket.data.playerId, action, payload || {});
+        broadcast(room);
+      });
+    }
+    for (const [ev, action] of [['tradePropose', 'propose'], ['tradeCancel', 'cancel'], ['tradeRespond', 'respond'], ['marketBuy', 'buy'], ['marketSell', 'sell'], ['tradeDone', 'done'], ['tradeEnd', 'end']]) {
+      on(ev, (payload) => {
+        const room = currentRoom();
+        const result = room.tradeAction(socket.data.playerId, action, payload || {});
+        broadcast(room);
+        return action === 'respond' ? result : undefined;
       });
     }
 

@@ -28,7 +28,7 @@ const html = (strings, ...vals) => raw(strings.reduce((out, s, i) => out + s + (
 
 // ---------- state ----------
 const ROLE_HINTS = ['Captain', 'Vice captain', 'Strategist', 'Support', 'Wildcard', 'Tank', 'Healer', 'Scout', 'Rival', 'Mentor'];
-const DEFAULT_ROOM = { roomName: '', visibility: 'private', roleCount: 5, roles: Array(10).fill(''), cap: 8, turnOrder: 'join', releasedHoldToBin: 'yes', timer: 'off', voteTimer: 'off' };
+const DEFAULT_ROOM = { gameType: 'wheel', funds: 100, currency: '£', roomName: '', visibility: 'private', roleCount: 5, roles: Array(10).fill(''), cap: 8, turnOrder: 'join', releasedHoldToBin: 'yes', timer: 'off', voteTimer: 'off' };
 // Reads saved room settings, keeping only known fields with sensible values.
 function savedRoom() {
   try {
@@ -44,6 +44,9 @@ function savedRoom() {
     if (['yes', 'no'].includes(raw.releasedHoldToBin)) out.releasedHoldToBin = raw.releasedHoldToBin;
     if (typeof raw.timer === 'string') out.timer = raw.timer;
     if (typeof raw.voteTimer === 'string') out.voteTimer = raw.voteTimer;
+    if (['wheel', 'auction'].includes(raw.gameType)) out.gameType = raw.gameType;
+    if ([50, 60, 70, 80, 90, 100].includes(Number(raw.funds))) out.funds = Number(raw.funds);
+    if (['£', '$', '€', '¥', 'Beli'].includes(raw.currency)) out.currency = raw.currency;
     return out;
   } catch { return {}; }
 }
@@ -76,6 +79,8 @@ const state = {
   endMode: 'swap', // end phase: 'swap' | 'bin' | 'extra'
   endFirst: null, // first role picked for a swap
   binChoice: null, // character picked from the bin
+  moveFrom: null, sellConfirm: null, buyPick: null, // auction squad interactions
+  tradeDraft: { to: '', give: [], get: [] },
   ballots: {}, // matchKey (room:game:match) -> { role: 'a' | 'b' }
   judgeDecision: {},
   img: new Map(), // charId -> 'loading' | 'ok' | 'fail'
@@ -91,6 +96,7 @@ const state = {
     charName: '', charImage: '', charPaste: '', charVerse: '', charSearch: '',
     poolIdentity: store.get('bd-pool-id') || '', poolNote: '', poolName: '', poolImage: '', poolPaste: '', poolNewVerse: '', poolSearch: '',
     contactName: '', contactReply: '', contactMessage: '',
+    tradeGiveFunds: '', tradeGetFunds: '',
   },
 };
 
@@ -368,6 +374,8 @@ const actions = {
     state.roomId = room.id;
     go('name', { peek: { ...room, visibility: 'public', phase: 'lobby' } });
   },
+  gameType(el) { state.form.gameType = el.value; render(); },
+  currency(el) { state.form.currency = el.value; render(); },
   roleCount(el) {
     state.form.roleCount = Number(el.value);
     state.form.cap = Math.min(state.form.cap, state.config.maxPlayers[state.form.roleCount]);
@@ -465,6 +473,57 @@ const actions = {
     Object.assign(state.form, DEFAULT_ROOM, { roles: Array(10).fill('') });
     state.roomSaved = false; toast('Back to the default settings.'); render();
   },
+  // ----- auction -----
+  async auctionBid(el) { const r = await emit('auctionBid', { amount: Number(el.dataset.amount) }); if (!r.ok) toast(r.message); },
+  async auctionPlace(el) { const r = await emit('auctionPlace', { area: el.dataset.area, index: Number(el.dataset.i) }); if (!r.ok) toast(r.message); },
+  async squadMove(el) {
+    const key = `${el.dataset.area}:${el.dataset.i}`;
+    if (!state.moveFrom) { state.moveFrom = key; render(); return; }
+    if (state.moveFrom === key) { state.moveFrom = null; render(); return; }
+    const [fa, fi] = state.moveFrom.split(':');
+    state.moveFrom = null;
+    const r = await emit('squadMove', { from: { area: fa, index: Number(fi) }, to: { area: el.dataset.area, index: Number(el.dataset.i) } });
+    if (!r.ok) toast(r.message);
+    render();
+  },
+  askSell(el) { state.sellConfirm = el.dataset.key; render(); },
+  async marketSell(el) {
+    state.sellConfirm = null;
+    const r = await emit('marketSell', { slot: { area: el.dataset.area, index: Number(el.dataset.i) } });
+    if (!r.ok) toast(r.message);
+  },
+  pickBuy(el) { state.buyPick = el.dataset.id; state.moveFrom = null; render(); },
+  cancelBuy() { state.buyPick = null; render(); },
+  async marketBuy(el) {
+    const charId = state.buyPick;
+    state.buyPick = null;
+    const r = await emit('marketBuy', { charId, swap: { area: el.dataset.area, index: Number(el.dataset.i) } });
+    if (!r.ok) toast(r.message); else toast(`Bought ${charName(charId)}.`, true);
+  },
+  tradeTo(el) { state.tradeDraft = { to: el.value, give: [], get: [] }; render(); },
+  tradePick(el) {
+    const list = state.tradeDraft[el.dataset.side];
+    const i = list.indexOf(el.dataset.id);
+    if (el.checked && i === -1) list.push(el.dataset.id); else if (!el.checked && i !== -1) list.splice(i, 1);
+  },
+  async tradePropose() {
+    const d = state.tradeDraft;
+    const r = await emit('tradePropose', { to: d.to, give: { chars: d.give, funds: Number(state.form.tradeGiveFunds) || 0 }, get: { chars: d.get, funds: Number(state.form.tradeGetFunds) || 0 } });
+    if (!r.ok) { toast(r.message); return; }
+    state.tradeDraft = { to: d.to, give: [], get: [] };
+    state.form.tradeGiveFunds = ''; state.form.tradeGetFunds = '';
+    toast('Offer sent.', true);
+  },
+  async tradeCancel() { const r = await emit('tradeCancel'); if (!r.ok) toast(r.message); },
+  async tradeRespond(el) {
+    const r = await emit('tradeRespond', { from: el.dataset.from, accept: el.dataset.accept === '1' });
+    if (!r.ok) toast(r.message);
+  },
+  async tradeDone(el) { const r = await emit('tradeDone', { done: el.dataset.done === '1' }); if (!r.ok) toast(r.message); },
+  async tradeEnd() {
+    if (!confirm('End trading for everyone and start the tournament?')) return;
+    const r = await emit('tradeEnd'); if (!r.ok) toast(r.message);
+  },
   async nextMatch() { const r = await emit('nextMatch'); if (!r.ok) toast(r.message); },
   async closeVoting() { if (!confirm('Close voting and count the votes that are in?')) return; const r = await emit('closeVoting'); if (!r.ok) toast(r.message); },
   async voteKick(el) {
@@ -507,11 +566,18 @@ const actions = {
 // Saved room settings (23 Oct 2026): kept in this browser so a host doesn't retype roles every game.
 function roomSettingsFromForm(f) {
   return { roomName: f.roomName, visibility: f.visibility, roleCount: f.roleCount, roles: [...f.roles], cap: f.cap,
-    turnOrder: f.turnOrder, releasedHoldToBin: f.releasedHoldToBin, timer: f.timer, voteTimer: f.voteTimer };
+    turnOrder: f.turnOrder, releasedHoldToBin: f.releasedHoldToBin, timer: f.timer, voteTimer: f.voteTimer,
+    gameType: f.gameType, funds: f.funds, currency: f.currency };
 }
 function saveRoomSettings() { store.set('bd-room-settings', JSON.stringify(roomSettingsFromForm(state.form))); state.roomSaved = true; }
 
 const forms = {
+  async bidAmount(form) {
+    const n = Number(form.querySelector('#bid-amount').value);
+    if (!Number.isInteger(n) || n <= 0) { toast('Type a whole number.'); return; }
+    const r = await emit('auctionBid', { amount: n });
+    if (!r.ok) toast(r.message); else form.querySelector('#bid-amount').value = '';
+  },
   async create(form) {
     const f = state.form;
     const settings = {
@@ -519,6 +585,7 @@ const forms = {
       roles: f.roles.slice(0, f.roleCount), cap: Number(f.cap), turnOrder: f.turnOrder,
       releasedHoldToBin: f.releasedHoldToBin === 'yes', timerEnabled: f.timer !== 'off', timerSeconds: Number(f.timer) || 30,
       voteTimerEnabled: f.voteTimer !== 'off', voteTimerSeconds: Number(f.voteTimer) || 60,
+      gameType: f.gameType, funds: Number(f.funds) || 100, currency: f.currency,
     };
     state.busy = true; render();
     const res = await emit('create', { settings, name: f.name, token });
@@ -641,11 +708,14 @@ function createScreen() {
   const max = state.config.maxPlayers[f.roleCount];
   const timerOpts = [['off', 'Off'], ...state.config.timerOptions.map((x) => [String(x), `${x}s`])];
   const voteTimerOpts = [['off', 'Off'], ...(state.config.voteTimerOptions || [30, 60, 90, 120]).map((x) => [String(x), `${x}s`])];
+  const auction = f.gameType === 'auction';
   return html`
     ${back()}
     <header class="screen-head"><h2>Create a game</h2><p>Set the rules, then share the link with your friends.</p></header>
     <form data-form="create" class="stack" novalidate>
       <section class="panel">
+        <div class="choice field"><span class="label">Game type</span>
+          ${seg('gtype', 'gameType', [['wheel', 'Wheel spin', 'Spin, hold, bin and place'], ['auction', 'Auction', 'Bid on every character, then trade']], f.gameType, 'gameType')}</div>
         <label class="field"><span class="label">Your gaming name</span>
           <input type="text" data-field="name" value="${f.name}" maxlength="20" autocomplete="nickname" required></label>
         <label class="field"><span class="label">Room name</span>
@@ -657,7 +727,7 @@ function createScreen() {
       <section class="panel">
         <h3>Team</h3>
         <div class="choice"><span class="label">Team size</span>
-          ${seg('size', 'roleCount', [[5, '5 roles', '1 respin each'], [10, '10 roles', '2 respins each']], f.roleCount, 'roleCount')}</div>
+          ${seg('size', 'roleCount', auction ? [[5, '5 roles', `+ ${3} bench`], [10, '10 roles', `+ ${3} bench`]] : [[5, '5 roles', '1 respin each'], [10, '10 roles', '2 respins each']], f.roleCount, 'roleCount')}</div>
         <div class="field"><span class="label">Role names <small>— in team order</small></span>
           <ol class="roles">${f.roles.slice(0, f.roleCount).map((r, i) => html`
             <li><span class="pos" aria-hidden="true">${i + 1}</span>
@@ -672,15 +742,22 @@ function createScreen() {
             <input type="number" data-field="cap" value="${f.cap}" min="3" max="${max}" inputmode="numeric" aria-label="Player cap">
             <button type="button" class="btn" data-action="capStep" data-step="1" aria-label="More players">+</button>
           </div></div>
+        ${auction ? html`
+        <div class="choice"><span class="label">Funds per player</span>
+          <div class="seg-3">${seg('funds', 'funds', (state.config.fundsOptions || [50, 60, 70, 80, 90, 100]).map((x) => [String(x), moneyText(x, f.currency)]), String(f.funds))}</div>
+          <p class="hint" style="margin-top:6px">Everyone starts with the same amount. Bidding closes 10 seconds after the last bid.</p></div>
+        <div class="choice"><span class="label">Currency</span>
+          ${seg('cur', 'currency', (state.config.currencies || ['£', '$', '€', '¥', 'Beli']).map((x) => [x, x]), f.currency, 'currency')}
+          ${f.currency === 'Beli' ? html`<p class="hint" style="margin-top:6px">Beli shows every amount ×1,000, so 100 shows as ${moneyText(100, 'Beli')}.</p>` : ''}</div>` : html`
         <div class="choice"><span class="label">Turn order</span>
           ${seg('order', 'turnOrder', [['join', 'Order of joining'], ['shuffle', 'Shuffle at start']], f.turnOrder)}</div>
         <div class="choice info-wrap ${state.tipOpen ? 'open' : ''}"><span class="label">Bin characters released from a hold?
           <button type="button" class="info-btn" data-action="tip" aria-label="What does this mean?" aria-expanded="${state.tipOpen}" aria-controls="hold-tip">?</button></span>
           <p class="tooltip" id="hold-tip" role="tooltip">When you hold a character, spin again and keep the new one, the held character is let go. <strong>Yes:</strong> they go in the bin and are out for the rest of the game. <strong>No:</strong> they go back on the wheel and anyone can land them.</p>
-          ${seg('hold', 'releasedHoldToBin', [['yes', 'Yes, bin them'], ['no', 'No, back on the wheel']], f.releasedHoldToBin)}</div>
+          ${seg('hold', 'releasedHoldToBin', [['yes', 'Yes, bin them'], ['no', 'No, back on the wheel']], f.releasedHoldToBin)}</div>`}
         <div class="choice"><span class="label">Placement timer</span>
           ${seg('timer', 'timer', timerOpts, f.timer)}
-          <p class="hint" style="margin-top:6px">If it runs out, the character goes back on the wheel and that turn is lost.</p></div>
+          <p class="hint" style="margin-top:6px">${auction ? 'Time to place a character you’ve won. If it runs out, they go in your first empty role, then the bench.' : 'If it runs out, the character goes back on the wheel and that turn is lost.'}</p></div>
         <div class="choice"><span class="label">Voting timer</span>
           ${seg('vtimer', 'voteTimer', voteTimerOpts, f.voteTimer)}
           <p class="hint" style="margin-top:6px">Time to vote on each face-off match. Off: voting ends when everyone has voted, or when you close it.</p></div>
@@ -1099,10 +1176,15 @@ function lobbyScreen(v) {
         <section class="panel">
           <h3>Rules</h3>
           <dl class="summary">
+            ${s.gameType === 'auction' ? html`
+            <dt>Game</dt><dd>Auction</dd>
+            <dt>Funds</dt><dd>${moneyText(s.funds, s.currency)} each</dd>
+            <dt>Squad</dt><dd>${s.roleCount} roles + 3 bench</dd>` : html`
+            <dt>Game</dt><dd>Wheel spin</dd>
             <dt>Respins</dt><dd>${s.roleCount === 10 ? 2 : 1} each</dd>
             <dt>Hold</dt><dd>1 each</dd>
             <dt>Turn order</dt><dd>${s.turnOrder === 'shuffle' ? 'Shuffled at start' : 'Order of joining'}</dd>
-            <dt>Released holds</dt><dd>${s.releasedHoldToBin ? 'Go in the bin' : 'Back on the wheel'}</dd>
+            <dt>Released holds</dt><dd>${s.releasedHoldToBin ? 'Go in the bin' : 'Back on the wheel'}</dd>`}
             <dt>Placement timer</dt><dd>${s.timerEnabled ? `${s.timerSeconds} seconds` : 'Off'}</dd>
             <dt>Voting timer</dt><dd>${s.voteTimerEnabled ? `${s.voteTimerSeconds} seconds` : 'Off'}</dd>
           </dl>
@@ -1140,6 +1222,13 @@ function missingCharacter() {
   state.lastCharRefetch = now;
   emit('getCharacters').then((r) => { if (r.ok && r.list) { state.characters = { version: r.version, list: r.list }; render(); } });
 }
+// Money (R14.5): currency is display only. Beli shows every amount x1,000 with the ฿ sign.
+function moneyText(n, currency) {
+  if (n == null) return '';
+  if (currency === 'Beli') return `฿${(Number(n) * 1000).toLocaleString('en-GB')}`;
+  return `${currency || '£'}${n}`;
+}
+const money = (v, n) => moneyText(n, v.settings.currency);
 // Tier lookup (R15.2): the full list first, then the tiers sent with every update. Bronze if unknown.
 const TIER_NAMES = ['Diamond', 'Gold', 'Silver', 'Bronze'];
 const tierOf = (id) => charById().get(id)?.tier || state.view?.charTiers?.[id] || 'Bronze';
@@ -1184,7 +1273,7 @@ function charCard(id, label, { selectable = false, choice = '', selected = false
 }
 
 function formation(v, pid, { interactive = false, compact = false } = {}) {
-  const team = v.draft.teams[pid] || [];
+  const team = v.draft?.teams[pid] || v.faceoff?.teams?.[pid] || squadOf(v, pid)?.roles || [];
   return html`
     <ol class="formation ${compact ? 'compact' : ''}">${v.settings.roles.map((role, i) => {
       const id = team[i];
@@ -1274,13 +1363,13 @@ function countdownFor(deadline, total) {
 function countdown(v) { return countdownFor(v.draft.turn?.deadline, v.draft.timerMs); }
 
 function tickCountdown() {
-  const el = document.querySelector('.countdown');
-  if (!el) return;
-  const left = Math.max(0, Number(el.dataset.deadline) - serverNow());
-  const total = Number(el.dataset.total) || 1;
-  el.querySelector('.bar').style.width = `${Math.min(100, (left / total) * 100)}%`;
-  el.querySelector('.secs').textContent = `${Math.ceil(left / 1000)}s`;
-  el.classList.toggle('urgent', left < 5000);
+  for (const el of document.querySelectorAll('.countdown')) {
+    const left = Math.max(0, Number(el.dataset.deadline) - serverNow());
+    const total = Number(el.dataset.total) || 1;
+    el.querySelector('.bar').style.width = `${Math.min(100, (left / total) * 100)}%`;
+    el.querySelector('.secs').textContent = `${Math.ceil(left / 1000)}s`;
+    el.classList.toggle('urgent', left < 5000);
+  }
 }
 setInterval(tickCountdown, 250);
 
@@ -1444,6 +1533,240 @@ function endPhaseScreen(v) {
     </div>`;
 }
 
+// ---------- auction (iteration 2) ----------
+const SLOT_AREAS = ['roles', 'bench'];
+const squadOf = (v, pid) => v.auction?.players?.[pid] || null;
+const ownedCount = (sq) => (sq ? [...sq.roles, ...sq.bench].filter((x) => x != null).length : 0);
+const squadFull = (v, pid) => { const sq = squadOf(v, pid); return Boolean(sq) && ownedCount(sq) === sq.roles.length + sq.bench.length; };
+const slotLabel = (v, area, i) => (area === 'roles' ? v.settings.roles[i] : `Bench ${i + 1}`);
+const chip = (id, extra = '') => html`<span class="sq-chip tier-${tierOf(id)} ${extra}">${charName(id)}</span>`;
+
+function auctionLogLine(v, e) {
+  const p = html`<strong>${pName(v, e.playerId)}</strong>`;
+  switch (e.kind) {
+    case 'bid': return html`${p} bid ${money(v, e.amount)} on ${charName(e.charId)}.`;
+    case 'won': return html`${p} won ${charName(e.charId)} for ${money(v, e.amount)}.`;
+    case 'unsold': return html`Nobody bid on ${charName(e.charId)}. They go to the market.`;
+    case 'placed': return html`${p} placed ${charName(e.charId)} in ${slotLabel(v, e.area, e.index)}.${e.replaced ? html` ${charName(e.replaced)} went to the market.` : ''}`;
+    case 'autoPlaced': return html`${charName(e.charId)} went in ${p}’s ${slotLabel(v, e.area, e.index)}${e.reason === 'away' ? ' while they were away' : ' when time ran out'}.`;
+    case 'autoMarket': return html`${p}’s squad was full, so ${charName(e.charId)} went to the market.`;
+    case 'auctionOver': return html`The auction is over. Trading is open.`;
+    case 'trade': {
+      const parts = [];
+      if (e.toA.length) parts.push(html`${e.toA.map(charName).join(', ')} ${e.toA.length === 1 ? 'joins' : 'join'} ${pName(v, e.a)}`);
+      if (e.toB.length) parts.push(html`${e.toB.map(charName).join(', ')} ${e.toB.length === 1 ? 'joins' : 'join'} ${pName(v, e.b)}`);
+      if (e.fundsToB) parts.push(html`${pName(v, e.b)} gets ${money(v, e.fundsToB)}`);
+      if (e.fundsToA) parts.push(html`${pName(v, e.a)} gets ${money(v, e.fundsToA)}`);
+      return html`<strong>${pName(v, e.a)}</strong> and <strong>${pName(v, e.b)}</strong> agreed a trade: ${parts.reduce((acc, x, i) => html`${acc}${i ? ', ' : ''}${x}`, '')}.`;
+    }
+    case 'bought': return html`${p} bought ${charName(e.charId)} from the market for ${money(v, e.amount)}. ${charName(e.replaced)} went to the market.`;
+    case 'sold': return html`${p} sold ${charName(e.charId)} to the market for ${money(v, e.amount)}.`;
+    case 'tradingOver': return html`Trading is over. ${e.reason === 'host' ? 'The host ended it.' : 'Everyone is done.'}`;
+    default: return '';
+  }
+}
+
+function auctionFeed(v) {
+  const log = [...(v.auction?.log || [])].reverse().filter((e) => e.kind !== 'bid').slice(0, 10);
+  return html`<div class="panel"><h3>What’s happened</h3>${log.length ? html`<ul class="feed">${log.map((e) => html`<li>${auctionLogLine(v, e)}</li>`)}</ul>` : html`<p class="hint">Wins, trades and sales appear here.</p>`}</div>`;
+}
+
+// mode: 'place' (put a won character in), 'trade' (sell / swap-for-market buttons), or plain (move only).
+function squadPanel(v, { mode = '' } = {}) {
+  const sq = squadOf(v, v.you);
+  if (!sq) return html`<div class="panel"><h3>Your squad</h3><p class="hint">You’re watching this game.</p></div>`;
+  const a = v.auction;
+  const placing = mode === 'place' && a.stage === 'placing' && a.pending?.playerId === v.you;
+  const buying = mode === 'trade' && state.buyPick;
+  const row = (area, i) => {
+    const id = sq[area][i];
+    const key = `${area}:${i}`;
+    const moving = state.moveFrom === key;
+    let btns = '';
+    if (placing) btns = html`<button class="btn btn-small btn-primary" data-action="auctionPlace" data-area="${area}" data-i="${i}">${id ? 'Replace' : 'Place here'}</button>`;
+    else if (buying) btns = id ? html`<button class="btn btn-small btn-primary" data-action="marketBuy" data-area="${area}" data-i="${i}">Swap out</button>` : '';
+    else {
+      const move = state.moveFrom
+        ? html`<button class="btn btn-small ${moving ? 'btn-primary' : ''}" data-action="squadMove" data-area="${area}" data-i="${i}">${moving ? 'Cancel' : 'Move here'}</button>`
+        : id ? html`<button class="btn btn-small" data-action="squadMove" data-area="${area}" data-i="${i}">Move</button>` : '';
+      const sell = mode === 'trade' && id && !state.moveFrom
+        ? (state.sellConfirm === key
+          ? html`<button class="btn btn-small btn-danger" data-action="marketSell" data-area="${area}" data-i="${i}">Sell for ${money(v, sellFor(tierOf(id)))}</button>`
+          : html`<button class="btn btn-small btn-ghost" data-action="askSell" data-key="${key}">Sell</button>`)
+        : '';
+      btns = html`${move}${sell}`;
+    }
+    return html`<li class="${area === 'bench' ? 'bench' : ''} ${moving ? 'picked' : ''}">
+      <span class="sq-role">${slotLabel(v, area, i)}</span>
+      <span class="sq-who">${id ? chip(id) : html`<span class="sq-empty">Empty</span>`}</span>
+      <span class="sq-btns">${btns}</span></li>`;
+  };
+  return html`<div class="panel"><h3>Your squad <small>${money(v, sq.funds)} left</small></h3>
+    ${placing ? html`<p class="place-prompt">You won ${charName(a.pending.charId)}. Tap where they go${squadFull(v, v.you) ? '. Your squad is full, so whoever you replace goes to the market' : ''}.</p>` : ''}
+    ${buying ? html`<p class="place-prompt">Buying ${charName(state.buyPick)} for ${money(v, TIER_PRICE[tierOf(state.buyPick)])}. Tap who to swap out. <button class="btn btn-small" data-action="cancelBuy">Cancel</button></p>` : ''}
+    ${state.moveFrom ? html`<p class="hint">Now tap where they should go.</p>` : ''}
+    <ul class="squad">${SLOT_AREAS.map((area) => sq[area].map((_, i) => row(area, i)))}</ul></div>`;
+}
+const TIER_PRICE = { Diamond: 7, Gold: 5, Silver: 3, Bronze: 1 };
+const sellFor = (tier) => Math.round(TIER_PRICE[tier] / 2 + 1e-9);
+
+function squadsPanel(v, { trade = false } = {}) {
+  const order = (v.turnOrder || []).filter((pid) => squadOf(v, pid));
+  const done = new Set(v.trade?.done || []);
+  return html`<div class="panel"><h3>Players</h3><ul class="squads">${order.map((pid) => {
+    const sq = squadOf(v, pid);
+    const lead = v.auction.stage === 'bidding' && v.auction.lot?.leader === pid;
+    return html`<li>
+      <span class="sq-name">${pName(v, pid)}${pid === v.you ? ' (you)' : ''}${lead ? html` <span class="pill">Top bid</span>` : ''}${trade && done.has(pid) ? html` <span class="pill done">Done</span>` : ''}</span>
+      <span class="sq-funds">${money(v, sq.funds)}</span>
+      <span class="sq-chips">${sq.roles.filter(Boolean).map((id) => chip(id))}${sq.bench.filter(Boolean).map((id) => chip(id, 'bench'))}</span>
+    </li>`;
+  })}</ul></div>`;
+}
+
+function marketPanel(v, { trade = false } = {}) {
+  const m = v.auction.market;
+  const canBuy = trade && squadFull(v, v.you) && (v.trade.buys[v.you] || 0) < v.trade.buyLimit;
+  const sq = squadOf(v, v.you);
+  return html`<div class="panel"><h3>Market <small>${m.length}</small></h3>
+    ${m.length ? html`<ul class="market-list">${m.map((id) => {
+      const price = TIER_PRICE[tierOf(id)];
+      return html`<li>${chip(id)} <span class="hint">${money(v, price)}</span>
+        ${trade ? html`<button class="btn btn-small" data-action="pickBuy" data-id="${id}" ${raw(canBuy && sq && sq.funds >= price ? '' : 'disabled')}>Buy</button>` : ''}</li>`;
+    })}</ul>` : html`<p class="hint">Unsold and swapped-out characters land here.</p>`}
+    ${trade ? html`<p class="hint">${squadFull(v, v.you) ? `Bought ${v.trade.buys[v.you] || 0} of ${v.trade.buyLimit}.` : 'Only players with every role and bench spot filled can buy.'} Anyone can sell to the market for half the tier price.</p>` : ''}
+  </div>`;
+}
+
+function auctionScreen(v) {
+  const a = v.auction;
+  const lot = a.lot;
+  const revealed = lot && state.shownSpinId === lot.spin.id;
+  const me = squadOf(v, v.you);
+  let action = '';
+  if (a.stage === 'bidding' && lot) {
+    if (!revealed) action = html`<p class="prompt">Spinning…</p>`;
+    else {
+      loadImage(lot.charId);
+      const leader = lot.leader;
+      const mine = leader === v.you;
+      const min = lot.min;
+      const can = me && !mine && min <= me.funds;
+      action = html`
+        ${charCard(lot.charId, `Opening price ${money(v, lot.price)}`)}
+        <p class="bid-now">${leader ? html`Top bid <strong>${money(v, lot.bid)}</strong> by ${mine ? 'you' : pName(v, leader)}` : 'No bids yet. First to bid pays the opening price.'}</p>
+        ${me ? html`
+          <button class="btn btn-primary btn-block bid-btn" data-action="auctionBid" data-amount="${min}" ${raw(can ? '' : 'disabled')}>${mine ? 'You hold the top bid' : leader ? `Raise to ${money(v, min)}` : `Bid ${money(v, min)}`}</button>
+          <form data-form="bidAmount" class="bid-amount">
+            <input type="number" id="bid-amount" min="${min}" max="${me.funds}" step="1" inputmode="numeric" placeholder="Or type an amount" aria-label="Bid amount${v.settings.currency === 'Beli' ? ' in thousands of Beli' : ''}" ${raw(mine ? 'disabled' : '')}>
+            <button class="btn btn-small" type="submit" ${raw(mine ? 'disabled' : '')}>Bid</button>
+          </form>
+          <p class="hint center">${!mine && min > me.funds ? `You have ${money(v, me.funds)}, not enough to bid.` : v.settings.currency === 'Beli' ? 'Type amounts in thousands: 12 means ฿12,000.' : `Raises go up by ${money(v, (lot.bid || lot.price) < 10 ? 1 : 2)}.`}</p>` : ''}`;
+    }
+  } else if (a.stage === 'placing' && a.pending) {
+    action = a.pending.playerId === v.you
+      ? html`${charCard(a.pending.charId, `You won for ${money(v, a.pending.paid)}`)}<p class="prompt">Tap a role or bench spot in your squad.</p>`
+      : html`${charCard(a.pending.charId, `Sold to ${pName(v, a.pending.playerId)}`)}<p class="prompt">${pName(v, a.pending.playerId)} is placing ${charName(a.pending.charId)}.</p>`;
+  } else if (a.stage === 'result') {
+    const last = [...a.log].reverse().find((e) => ['won', 'unsold'].includes(e.kind));
+    action = last ? html`${charCard(last.charId, last.kind === 'won' ? `Sold to ${pName(v, last.playerId)} for ${money(v, last.amount)}` : 'Unsold: to the market')}` : '';
+  }
+  return html`
+    <header class="turn-banner">
+      <p class="round">Auction · Character ${Math.max(1, a.lotNumber)} of ${a.lotTotal}</p>
+      <h2>${a.stage === 'bidding' && lot ? (revealed ? charName(lot.charId) : 'Spinning…') : a.stage === 'placing' ? 'Placing…' : 'Next character…'}</h2>
+      ${me ? html`<p class="tokens"><span>Your funds ${money(v, me.funds)}</span></p>` : ''}
+      ${a.stage === 'bidding' && revealed ? countdownFor(lot.deadline, a.bidMs) : a.stage === 'placing' && a.deadline ? countdownFor(a.deadline, a.placementMs) : ''}
+    </header>
+    <div class="draft-grid">
+      <section class="wheel-col">
+        <div id="wheel-slot"></div>
+        <div class="action-area">${action}</div>
+      </section>
+      <section class="team-col">
+        ${squadPanel(v, { mode: 'place' })}
+        ${squadsPanel(v)}
+        ${marketPanel(v)}
+        ${auctionFeed(v)}
+      </section>
+    </div>`;
+}
+
+// ---------- trade phase (iteration 2) ----------
+function offerSummary(v, t, forMe) {
+  const side = (chars, funds) => [...chars.map((id) => chip(id)), ...(funds ? [html`<span class="sq-chip funds">${money(v, funds)}</span>`] : [])];
+  const give = side(t.give.chars, t.give.funds); const get = side(t.get.chars, t.get.funds);
+  const from = pName(v, t.from); const to = pName(v, t.to);
+  return html`<div class="offer">
+    <p><strong>${forMe ? `${from} offers you` : `You offer ${to}`}</strong></p>
+    <div class="offer-sides">
+      <div><span class="label">${forMe ? 'You get' : `${to} gets`}</span>${give.length ? give : html`<span class="hint">Nothing</span>`}</div>
+      <div><span class="label">${forMe ? `${from} gets` : 'You get'}</span>${get.length ? get : html`<span class="hint">Nothing</span>`}</div>
+    </div>
+    ${countdownFor(t.expiresAt, v.trade.proposalMs)}
+  </div>`;
+}
+
+function tradeBuilder(v) {
+  const others = (v.turnOrder || []).filter((pid) => pid !== v.you && squadOf(v, pid));
+  const d = state.tradeDraft;
+  if (!others.includes(d.to)) d.to = others[0] || '';
+  const mine = squadOf(v, v.you);
+  const theirs = squadOf(v, d.to);
+  const pick = (who, id) => html`<label class="pick-chip"><input type="checkbox" data-change="tradePick" data-side="${who}" data-id="${id}" ${raw((who === 'give' ? d.give : d.get).includes(id) ? 'checked' : '')}>${chip(id)}</label>`;
+  const all = (sq) => (sq ? [...sq.roles, ...sq.bench].filter(Boolean) : []);
+  return html`<div class="panel"><h3>Make an offer</h3>
+    <label class="field"><span class="label">Trade with</span>
+      <select data-change="tradeTo" aria-label="Player to trade with">${others.map((pid) => html`<option value="${pid}" ${raw(pid === d.to ? 'selected' : '')}>${pName(v, pid)}</option>`)}</select></label>
+    <div class="offer-build">
+      <div><span class="label">You give</span><div class="pick-list">${all(mine).map((id) => pick('give', id))}</div>
+        <label class="field funds-field"><span class="label">Plus funds${v.settings.currency === 'Beli' ? ' (thousands)' : ''}</span><input type="number" min="0" max="${mine?.funds ?? 0}" data-field="tradeGiveFunds" value="${state.form.tradeGiveFunds}" inputmode="numeric"></label></div>
+      <div><span class="label">You get</span><div class="pick-list">${all(theirs).map((id) => pick('get', id))}</div>
+        <label class="field funds-field"><span class="label">Plus funds${v.settings.currency === 'Beli' ? ' (thousands)' : ''}</span><input type="number" min="0" data-field="tradeGetFunds" value="${state.form.tradeGetFunds}" inputmode="numeric"></label></div>
+    </div>
+    <button class="btn btn-primary" data-action="tradePropose" ${raw(d.to ? '' : 'disabled')}>Send offer</button>
+    <p class="hint">They have 30 seconds to accept. One offer at a time.</p>
+  </div>`;
+}
+
+function tradeScreen(v) {
+  const t = v.trade;
+  const me = squadOf(v, v.you);
+  const incoming = t.offers.filter((o) => o.to === v.you);
+  const outgoing = t.offers.find((o) => o.from === v.you);
+  const order = (v.turnOrder || []).filter((pid) => squadOf(v, pid));
+  const doneCount = order.filter((pid) => t.done.includes(pid)).length;
+  const iAmDone = t.done.includes(v.you);
+  const hostReady = serverNow() >= t.canEndAt;
+  return html`
+    <header class="turn-banner">
+      <p class="round">Trading · no time limit</p>
+      <h2>${iAmDone ? 'You’re done trading' : 'Trade, buy and sell'}</h2>
+      <p class="tokens"><span>${doneCount} of ${order.length} done</span>${me ? html`<span>Your funds ${money(v, me.funds)}</span>` : ''}</p>
+    </header>
+    <div class="draft-grid">
+      <section class="wheel-col stack">
+        ${incoming.map((o) => html`<div class="panel offer-in">${offerSummary(v, o, true)}
+          <div class="row-actions"><button class="btn btn-primary" data-action="tradeRespond" data-from="${o.from}" data-accept="1">Accept</button>
+          <button class="btn" data-action="tradeRespond" data-from="${o.from}" data-accept="0">Decline</button></div></div>`)}
+        ${outgoing ? html`<div class="panel">${offerSummary(v, outgoing, false)}<button class="btn btn-small" data-action="tradeCancel">Cancel offer</button></div>` : me ? tradeBuilder(v) : ''}
+        ${me ? html`<div class="panel done-panel">
+          <button class="btn ${iAmDone ? '' : 'btn-primary'} btn-block" data-action="tradeDone" data-done="${iAmDone ? '0' : '1'}">${iAmDone ? 'I’m not done yet' : 'I’m done trading'}</button>
+          <p class="hint">The tournament starts when everyone is done. Only characters in roles fight; the bench sits out.</p></div>` : ''}
+        ${v.isHost ? html`<div class="panel"><h3>Host</h3>
+          <button class="btn btn-small" data-action="tradeEnd" ${raw(hostReady ? '' : 'disabled')}>End trading for everyone</button>
+          <p class="hint">${hostReady ? 'Ends trading now and starts the tournament. Any waiting offers are cancelled.' : html`Available after 90 seconds of trading. ${countdownFor(t.canEndAt, 90_000)}`}</p>
+          <p class="hint">${t.waiting} ${t.waiting === 1 ? 'offer is' : 'offers are'} waiting for an answer.</p></div>` : ''}
+      </section>
+      <section class="team-col">
+        ${squadPanel(v, { mode: 'trade' })}
+        ${marketPanel(v, { trade: true })}
+        ${squadsPanel(v, { trade: true })}
+        ${auctionFeed(v)}
+      </section>
+    </div>`;
+}
+
 // ---------- face-off (phase 5) ----------
 function bracket(v) {
   const f = v.faceoff;
@@ -1547,7 +1870,7 @@ function faceoffPlayers(v) {
 
 function faceoffScreen(v) {
   const f = v.faceoff;
-  const out = v.draft.order.filter((pid) => !f.alive.includes(pid) && v.players.some((p) => p.id === pid));
+  const out = (v.draft?.order || v.turnOrder || []).filter((pid) => !f.alive.includes(pid) && v.players.some((p) => p.id === pid));
   return html`
     <header class="turn-banner"><p class="round">Face-off</p><h2>${f.match ? `${pName(v, f.match.a)} vs ${pName(v, f.match.b)}` : 'Next match…'}</h2></header>
     <div class="stack">
@@ -1606,13 +1929,13 @@ function finishedScreen(v) {
       <p class="champ-sub">${champ ? (isMe ? 'Your squad beat everyone. Enjoy the bragging rights.' : `${pName(v, champ)} wins ${v.settings.roomName}.`) : 'Everyone left before the final.'}</p>
     </section>
     <div class="stack">
-      ${champ && v.draft?.teams[champ] ? html`<section class="panel"><h3>The winning team</h3>${formation(v, champ, { compact: true })}</section>` : ''}
+      ${champ && (v.draft?.teams[champ] || v.faceoff?.teams?.[champ]) ? html`<section class="panel"><h3>The winning team</h3>${formation(v, champ, { compact: true })}</section>` : ''}
       <section class="panel"><h3>Final bracket</h3>${bracket(v)}</section>
     </div>
     <div class="start-zone">
       ${v.isHost ? html`
         <button class="btn btn-primary btn-block" data-action="restart" ${raw(here < 3 ? 'disabled' : '')}>Play again</button>
-        <p class="why">${here < 3 ? `A rematch needs at least 3 players. ${here} ${here === 1 ? 'is' : 'are'} here.` : 'Same players, roles and characters. The bin is cleared and the wheel starts full.'}</p>`
+        <p class="why">${here < 3 ? `A rematch needs at least 3 players. ${here} ${here === 1 ? 'is' : 'are'} here.` : v.settings.gameType === 'auction' ? 'Same players, roles and characters. A new lot is drawn and everyone’s funds reset.' : 'Same players, roles and characters. The bin is cleared and the wheel starts full.'}</p>`
       : html`<p class="why">Waiting for ${host?.name} to start a rematch.</p>`}
       <button class="btn btn-ghost btn-small" style="margin-top:18px" data-action="leave">Leave game</button>
     </div>`;
@@ -1645,18 +1968,19 @@ function syncWheel(v) {
     if (t?.spin && (t.stage === 'landed' || t.stage === 'compare')) spin = t.spin;
     held = t?.held ?? null;
   } else if (v.phase === 'endphase' && v.end?.players?.[v.you]?.stage === 'extra') spin = v.end.players[v.you].spin;
+  else if (v.phase === 'auction' && v.auction.stage === 'bidding' && v.auction.lot) spin = v.auction.lot.spin;
   if (spin) {
     w.setSegments(spin.wheel, names);
     loadImage(spin.landed);
     if (state.shownSpinId !== spin.id && state.animatingSpin !== spin.id) {
       state.animatingSpin = spin.id;
       w.spinTo(spin.landed, {
-        duration: d.spinMs, elapsed: serverNow() - spin.at, seed: spin.id,
+        duration: (d || v.auction).spinMs, elapsed: serverNow() - spin.at, seed: spin.id,
         onDone: () => { state.shownSpinId = spin.id; state.animatingSpin = null; render(); },
       });
     } else if (!w.spinning) w.showName(charName(spin.landed));
   } else {
-    w.setSegments(d.pool, names);
+    w.setSegments(d ? d.pool : v.auction.remaining, names);
     if (!w.spinning) w.showName(held != null ? `Holding ${charName(held)}` : '');
   }
 }
@@ -1685,6 +2009,8 @@ function render() {
       else if (v.phase === 'lobby') body = lobbyScreen(v);
       else if (v.phase === 'draft') body = draftScreen(v);
       else if (v.phase === 'endphase') body = endPhaseScreen(v);
+      else if (v.phase === 'auction') body = auctionScreen(v);
+      else if (v.phase === 'trade') body = tradeScreen(v);
       else if (v.phase === 'faceoff') body = faceoffScreen(v);
       else body = finishedScreen(v);
       break;
@@ -1695,7 +2021,8 @@ function render() {
   const active = document.activeElement;
   const key = active?.dataset?.field || active?.id;
   const sel = active && 'selectionStart' in active ? [active.selectionStart, active.selectionEnd] : null;
-  const wheelPhase = state.screen === 'room' && ['draft', 'endphase'].includes(state.view?.phase);
+  const wheelPhase = state.screen === 'room' && ['draft', 'endphase', 'auction'].includes(state.view?.phase);
+  $app.classList.toggle('wide-trade', state.screen === 'room' && state.view?.phase === 'trade');
   $app.classList.toggle('wide', wheelPhase);
   $app.innerHTML = fmt(html`${state.screen === 'room' || state.newVersion ? offlineBar() : ''}${body}`);
   if (wheelPhase) syncWheel(state.view);

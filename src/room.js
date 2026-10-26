@@ -4,12 +4,15 @@
 import {
   ROLE_COUNTS, MIN_PLAYERS, NAME_MAX, ROLE_NAME_MAX, ROOM_NAME_MAX,
   PLACEMENT_TIMER_OPTIONS, VOTE_TIMER_OPTIONS, maxPlayersFor, minimumPool,
+  GAME_TYPES, FUNDS_OPTIONS, CURRENCIES, auctionLotSize,
 } from './config.js';
 import { parseText, mergeCharacters } from './characters.js';
 import { isTier, tierOrDefault } from './tiers.js';
 import { Draft, DraftError } from './draft.js';
 import { EndPhase } from './endphase.js';
 import { Faceoff } from './faceoff.js';
+import { Auction } from './auction.js';
+import { TradePhase } from './trade.js';
 import { isProfane } from './profanity.js';
 import { shortId } from './ids.js';
 
@@ -32,6 +35,9 @@ export function validateName(raw) {
 }
 
 export function validateSettings(input = {}) {
+  // R14.1: Wheel spin (the original game) or Auction. Older clients send nothing: wheel.
+  const gameType = input.gameType == null || input.gameType === '' ? 'wheel' : input.gameType;
+  if (!GAME_TYPES.includes(gameType)) throw new GameError('GAME_TYPE', 'Choose Wheel spin or Auction.');
   const roomName = clean(input.roomName);
   if (!roomName) throw new GameError('ROOM_NAME_EMPTY', 'Give the room a name.');
   if (roomName.length > ROOM_NAME_MAX) throw new GameError('ROOM_NAME_LONG', `Room names can be up to ${ROOM_NAME_MAX} characters.`);
@@ -71,7 +77,16 @@ export function validateSettings(input = {}) {
     throw new GameError('VOTE_TIMER', 'Pick a voting timer from the list.');
   }
 
-  return { roomName, visibility, roleCount, roles, cap, turnOrder, releasedHoldToBin, timerEnabled, timerSeconds, voteTimerEnabled, voteTimerSeconds };
+  // R14.4, R14.5: auction funds (50-100 in steps of 10, default 100) and the currency shown.
+  let funds = null; let currency = null;
+  if (gameType === 'auction') {
+    funds = input.funds == null || input.funds === '' ? 100 : Number(input.funds);
+    if (!FUNDS_OPTIONS.includes(funds)) throw new GameError('FUNDS', 'Pick funds of 50, 60, 70, 80, 90 or 100.');
+    currency = input.currency == null || input.currency === '' ? '£' : input.currency;
+    if (!CURRENCIES.includes(currency)) throw new GameError('CURRENCY', 'Pick £, $, €, ¥ or Beli.');
+  }
+
+  return { gameType, roomName, visibility, roleCount, roles, cap, turnOrder, releasedHoldToBin, timerEnabled, timerSeconds, voteTimerEnabled, voteTimerSeconds, funds, currency };
 }
 
 export class Room {
@@ -260,10 +275,13 @@ export class Room {
     return true;
   }
 
-  // The face-off pauses while nobody who can vote or judge the current match is connected.
+  // Connection changes: the face-off pauses while nobody who can vote or judge is connected; an auction
+  // winner who drops is placed for; trade offers with someone who dropped are cancelled.
   #syncFaceoff(now = Date.now()) {
-    if (this.phase !== 'faceoff' || !this.faceoff) return;
-    this.faceoff.refresh(now);
+    if (this.phase === 'faceoff' && this.faceoff) this.faceoff.refresh(now);
+    else if (this.phase === 'auction' && this.auction) this.auction.refresh(now);
+    else if (this.phase === 'trade' && this.trade) this.trade.refresh(now);
+    else return;
     this.#afterDraftChange(now);
   }
 
@@ -301,6 +319,12 @@ export class Room {
       this.#afterDraftChange(now);
     } else if (this.phase === 'faceoff') {
       this.faceoff.removePlayer(id, now);
+      this.#afterDraftChange(now);
+    } else if (this.phase === 'auction') {
+      this.auction.removePlayer(id, now);
+      this.#afterDraftChange(now);
+    } else if (this.phase === 'trade') {
+      this.trade.removePlayer(id, now);
       this.#afterDraftChange(now);
     }
     this.#touch();
@@ -391,11 +415,18 @@ export class Room {
   }
 
   // ---------- starting ----------
+  // Wheel: R5.6 minimum. Auction: the lot size (R14.7), since the auction only draws that many.
+  charactersNeeded(players) {
+    return this.settings.gameType === 'auction'
+      ? auctionLotSize(players, this.settings.roleCount)
+      : minimumPool(players, this.settings.roleCount);
+  }
+
   startBlockers() {
     const reasons = [];
     const n = this.connectedPlayers.length;
     if (n < MIN_PLAYERS) reasons.push(`Waiting for players: ${n} of at least ${MIN_PLAYERS}.`);
-    const need = minimumPool(Math.max(n, MIN_PLAYERS), this.settings.roleCount);
+    const need = this.charactersNeeded(Math.max(n, MIN_PLAYERS));
     if (this.characters.length < need) {
       reasons.push(`Add more characters: ${this.characters.length} of ${need} needed for ${Math.max(n, MIN_PLAYERS)} players.`);
     }
@@ -416,8 +447,9 @@ export class Room {
     }
     this.turnOrder = order;
     this.requests = [];
-    this.phase = 'draft';
     this.nameCache = Object.fromEntries(this.players.map((p) => [p.id, p.name])); // names survive players leaving
+    if (this.settings.gameType === 'auction') { this.#startAuction(order, rng, now); return; }
+    this.phase = 'draft';
     this.draft = new Draft({
       characterIds: this.characters.map((c) => c.id),
       turnOrder: order,
@@ -428,6 +460,63 @@ export class Room {
     });
     this.draft.begin(now);
     this.#touch();
+  }
+
+  // ---------- the auction (iteration 2) ----------
+  // R14.7: a random lot of roles x players + 20% from the loaded list.
+  #startAuction(order, rng, now) {
+    const pool = [...this.characters];
+    for (let i = pool.length - 1; i > 0; i -= 1) { const j = Math.floor(rng() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+    const lot = pool.slice(0, auctionLotSize(order.length, this.settings.roleCount));
+    this.phase = 'auction';
+    this.auction = new Auction({
+      lot: lot.map((c) => c.id),
+      tiers: Object.fromEntries(this.characters.map((c) => [c.id, tierOrDefault(c.tier)])),
+      order,
+      roleCount: this.settings.roleCount,
+      funds: this.settings.funds,
+      placementMs: this.settings.timerEnabled ? this.settings.timerSeconds * 1000 : 0,
+      ctx: { connected: (pid) => Boolean(this.player(pid)?.connected) },
+      ...(this.random ? { random: this.random } : {}),
+    });
+    this.auction.begin(now);
+    this.#touch();
+  }
+
+  auctionAction(playerId, action, payload = {}, now = Date.now()) {
+    if (this.phase !== 'auction' && !(this.phase === 'trade' && action === 'move')) throw new GameError('NOT_AUCTION', 'The auction isn’t running.');
+    const a = this.auction;
+    this.#wrap(() => {
+      switch (action) {
+        case 'bid': a.bid(playerId, payload.amount, now); break;
+        case 'place': a.place(playerId, payload.area, payload.index, now); break;
+        case 'move': a.move(playerId, payload.from, payload.to); break;
+        default: throw new GameError('BAD_ACTION', 'Unknown action.');
+      }
+    });
+    this.#afterDraftChange(now);
+    this.#touch();
+  }
+
+  tradeAction(playerId, action, payload = {}, now = Date.now()) {
+    if (this.phase !== 'trade') throw new GameError('NOT_TRADING', 'Trading isn’t open.');
+    const t = this.trade;
+    let result;
+    this.#wrap(() => {
+      switch (action) {
+        case 'propose': result = t.propose(playerId, payload.to, payload, now); break;
+        case 'cancel': t.cancel(playerId); break;
+        case 'respond': result = t.respond(playerId, payload.from, Boolean(payload.accept), now); break;
+        case 'buy': t.buy(playerId, payload.charId, payload.swap, now); break;
+        case 'sell': t.sell(playerId, payload.slot, now); break;
+        case 'done': t.setDone(playerId, payload.done !== false, now); break;
+        case 'end': this.#requireHost(playerId); t.hostEnd(now); break;
+        default: throw new GameError('BAD_ACTION', 'Unknown action.');
+      }
+    });
+    this.#afterDraftChange(now);
+    this.#touch();
+    return result;
   }
 
   // ---------- the draft (phase 3) ----------
@@ -457,11 +546,21 @@ export class Room {
       this.endPhase = new EndPhase(this.draft, this.random ? { random: this.random } : {});
       this.endPhase.begin(now);
     }
-    if (this.phase === 'endphase' && this.endPhase.finished) {
+    if (this.phase === 'auction' && this.auction.finished) {
+      this.phase = 'trade';
+      this.trade = new TradePhase(this.auction, { now, ctx: { connected: (pid) => Boolean(this.player(pid)?.connected) } });
+    }
+    // R17.11: only characters in roles go into the tournament; the bench is not used.
+    const auctionDone = this.phase === 'trade' && this.trade.finished;
+    if ((this.phase === 'endphase' && this.endPhase.finished) || auctionDone) {
+      const teams = auctionDone
+        ? new Map([...this.auction.players].map(([pid, p]) => [pid, [...p.roles]]))
+        : this.draft.teams;
+      const order = (auctionDone ? this.turnOrder : this.draft.order).filter((id) => this.player(id) && teams.has(id));
       this.phase = 'faceoff';
       this.faceoff = new Faceoff({
-        order: this.draft.order.filter((id) => this.player(id)),
-        teams: this.draft.teams,
+        order,
+        teams,
         roleCount: this.settings.roleCount,
         voteSeconds: this.settings.voteTimerEnabled ? this.settings.voteTimerSeconds : 0,
         ctx: { players: () => this.players.map((p) => ({ id: p.id, connected: p.connected })), hostId: () => this.hostId },
@@ -482,7 +581,7 @@ export class Room {
     if (here < MIN_PLAYERS) throw new GameError('CANT_RESTART', `A rematch needs at least ${MIN_PLAYERS} players. ${here} ${here === 1 ? 'is' : 'are'} here.`);
     for (const p of this.players.filter((x) => !x.connected)) this.#removePlayer(p.id, now);
     this.phase = 'lobby';
-    this.draft = null; this.endPhase = null; this.faceoff = null;
+    this.draft = null; this.endPhase = null; this.faceoff = null; this.auction = null; this.trade = null;
     this.kickVotes.clear();
     this.turnOrder = [];
     this.games = (this.games || 1) + 1;
@@ -535,6 +634,8 @@ export class Room {
   // When the server should next check the current turn (timer or inactive player), or null.
   turnDueAt() {
     if (this.phase === 'endphase') return this.endPhase.dueAt();
+    if (this.phase === 'auction') return this.auction.dueAt();
+    if (this.phase === 'trade') return this.trade.dueAt();
     if (this.phase === 'faceoff') return this.faceoff.dueAt();
     if (this.phase !== 'draft' || !this.draft?.turn) return null;
     const active = this.player(this.draft.turn.playerId);
@@ -546,6 +647,8 @@ export class Room {
     const due = this.turnDueAt();
     if (due == null || now < due) return false;
     if (this.phase === 'endphase') this.endPhase.timeout(now);
+    else if (this.phase === 'auction') this.auction.timeout(now);
+    else if (this.phase === 'trade') this.trade.timeout(now);
     else if (this.phase === 'faceoff') this.faceoff.timeout(now);
     else this.draft.timeout(now, this.draft.turn.deadline ? 'timer' : 'inactive');
     this.#afterDraftChange(now);
@@ -570,12 +673,14 @@ export class Room {
       startBlockers: this.startBlockers(),
       characterCount: this.characters.length,
       charVersion: this.charVersion,
-      poolNeeded: minimumPool(Math.max(this.connectedPlayers.length, MIN_PLAYERS), this.settings.roleCount),
-      poolForCap: minimumPool(this.settings.cap, this.settings.roleCount),
+      poolNeeded: this.charactersNeeded(Math.max(this.connectedPlayers.length, MIN_PLAYERS)),
+      poolForCap: this.charactersNeeded(this.settings.cap),
       draft: this.draft ? this.draft.view(Date.now()) : null,
       charNames: this.#referencedNames(),
       charTiers: this.#referencedTiers(),
       end: this.endPhase ? this.endPhase.view() : null,
+      auction: this.auction ? this.auction.view() : null,
+      trade: this.trade ? this.trade.view(playerId) : null,
       faceoff: this.faceoff ? this.faceoff.view(playerId) : null,
       game: this.games || 1,
       names: { ...(this.nameCache || {}), ...Object.fromEntries(this.players.map((p) => [p.id, p.name])) },
@@ -593,16 +698,19 @@ export class Room {
   }
 
   #referencedNames() {
-    if (!this.draft) return {};
+    if (!this.draft && !this.auction) return {};
     const byId = new Map(this.characters.map((c) => [c.id, c.name]));
     const ids = new Set();
     const add = (id) => { if (id != null) ids.add(id); };
     const d = this.draft;
-    const t = d.turn;
-    if (t) { add(t.landed); add(t.held); add(t.spin?.landed); }
-    for (const team of d.teams.values()) team.forEach(add);
-    d.binned.forEach(add);
-    for (const e of d.log) { add(e.charId); add(e.released); add(e.replaced); add(e.returned); }
+    if (d) {
+      const t = d.turn;
+      if (t) { add(t.landed); add(t.held); add(t.spin?.landed); }
+      for (const team of d.teams.values()) team.forEach(add);
+      d.binned.forEach(add);
+      for (const e of d.log) { add(e.charId); add(e.released); add(e.replaced); add(e.returned); }
+    }
+    if (this.auction) this.auction.referenced().forEach(add);
     if (this.endPhase) for (const p of this.endPhase.players.values()) { add(p.landed); add(p.spin?.landed); }
     if (this.faceoff) for (const team of this.faceoff.teams.values()) team.forEach(add);
     const out = {};
