@@ -673,9 +673,9 @@ select:focus-visible { outline: 3px solid var(--pink); outline-offset: 1px; }
 @media (prefers-reduced-motion: reduce) { .bid-price.bump, .bid-board.outbid .bid-status, .going.hot, .gavel-btn .gavel { animation: none !important; } }
 
 /* SOLD / NO SALE stamp across the poster */
-.stamped { position: relative; display: grid; justify-items: center; width: 100%; }
+.stamped { position: relative; display: grid; justify-items: center; width: 100%; overflow-x: clip; overflow-y: visible; }
 .stamp {
-  position: absolute; top: 42%; left: 50%; transform: translate(-50%, -50%) rotate(-14deg);
+  position: absolute; top: 42%; left: 0; right: 0; margin-inline: auto; width: max-content; max-width: 92%; transform: translateY(-50%) rotate(-14deg);
   padding: 6px 16px; border: 5px solid currentColor; border-radius: 8px; font-family: var(--display); font-size: 1.6rem;
   letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; background: rgba(255, 255, 255, 0.6);
   opacity: 0.92; pointer-events: none;
@@ -683,5 +683,11 @@ select:focus-visible { outline: 3px solid var(--pink); outline-offset: 1px; }
 .stamp.enter { animation: stamp-in 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.4) both; }
 .stamp.sold { color: #c0162f; }
 .stamp.nosale { color: #3b3b48; }
-@keyframes stamp-in { 0% { transform: translate(-50%, -50%) rotate(-14deg) scale(2.2); opacity: 0; } 100% { transform: translate(-50%, -50%) rotate(-14deg) scale(1); opacity: 0.92; } }
+@keyframes stamp-in { 0% { transform: translateY(-50%) rotate(-14deg) scale(2.2); opacity: 0; } 100% { transform: translateY(-50%) rotate(-14deg) scale(1); opacity: 0.92; } }
 @media (prefers-reduced-motion: reduce) { .stamp.enter { animation: none; } }
+
+/* Phones (27 Oct 2026): once a character has landed, the wheel steps aside so the poster and the
+   bid / place controls are on screen without scrolling. It comes back for the next spin. */
+@media (max-width: 899px) {
+  .wheel-col.wheel-done #wheel-slot { display: none; }
+}

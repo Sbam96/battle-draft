@@ -1550,7 +1550,7 @@ function draftScreen(v) {
       ${countdown(v)}
     </header>
     <div class="draft-grid">
-      <section class="wheel-col">
+      <section class="wheel-col ${revealed && (t?.stage === 'landed' || t?.stage === 'compare') ? 'wheel-done' : ''}">
         <div id="wheel-slot"></div>
         <div class="action-area">${actionArea(v)}</div>
       </section>
@@ -1863,7 +1863,7 @@ function auctionScreen(v) {
       ${a.stage === 'bidding' && revealed ? countdownFor(lot.deadline, a.bidMs) : a.stage === 'placing' && a.deadline ? countdownFor(a.deadline, a.placementMs) : ''}
     </header>
     <div class="draft-grid">
-      <section class="wheel-col">
+      <section class="wheel-col ${(a.stage === 'bidding' && revealed) || a.stage === 'placing' || a.stage === 'result' ? 'wheel-done' : ''}">
         <div id="wheel-slot"></div>
         <div class="action-area">${action}</div>
       </section>
