@@ -1,6 +1,7 @@
 // Battle Draft client. Renders screens from server state; the server decides everything that matters.
 /* global io */
 import { Wheel } from './wheel.js';
+import { posterKind, STARS } from './factions.js';
 
 const socket = io({ transports: ['websocket', 'polling'] });
 const $app = document.getElementById('app');
@@ -202,6 +203,15 @@ socket.on('room', (view) => {
   keepAwake(true);
   if (view.draft) state.clockOffset = view.draft.serverNow - Date.now();
   if (view.draft?.turn?.stage === 'landed' || view.draft?.turn?.stage === 'spin') state.keepChoice = 'new';
+  // Outbid / won (27 Oct 2026): flash and buzz so players notice without staring at the screen.
+  const prevLot = state.view?.auction?.lot; const nextLot = view.auction?.lot;
+  if (prevLot && nextLot && prevLot.spin.id === nextLot.spin.id && prevLot.leader === view.you && nextLot.leader && nextLot.leader !== view.you) {
+    state.outbid = { lotId: nextLot.spin.id, at: Date.now() };
+    try { navigator.vibrate?.([80, 60, 80]); } catch { /* not supported */ }
+  }
+  if (view.auction?.pending?.playerId === view.you && state.view?.auction?.pending?.playerId !== view.you) {
+    try { navigator.vibrate?.(200); } catch { /* not supported */ }
+  }
   state.view = view;
   state.roomId = view.id;
   if (state.screen !== 'room') { state.screen = 'room'; state.error = ''; window.scrollTo(0, 0); }
@@ -539,6 +549,14 @@ const actions = {
     state.roomSaved = false; toast('Back to the default settings.'); render();
   },
   // ----- auction -----
+  customStep(el) {
+    const lot = state.view?.auction?.lot; const me = squadOf(state.view, state.view.you);
+    if (!lot || !me) return;
+    const cur = state.customBid || lot.min;
+    const stepSize = cur < 10 ? 1 : 2;
+    state.customBid = Math.max(lot.min, Math.min(me.funds, cur + Number(el.dataset.step) * stepSize));
+    render();
+  },
   async auctionBid(el) { const r = await emit('auctionBid', { amount: Number(el.dataset.amount) }); if (!r.ok) toast(r.message); },
   async auctionPlace(el) { const r = await emit('auctionPlace', { area: el.dataset.area, index: Number(el.dataset.i) }); if (!r.ok) toast(r.message); },
   async squadMove(el) {
@@ -825,7 +843,7 @@ function createScreen() {
           <p class="hint" style="margin-top:6px">Everyone starts with the same amount. Bidding closes 10 seconds after the last bid.</p></div>
         <div class="choice"><span class="label">Currency</span>
           ${seg('cur', 'currency', (state.config.currencies || ['£', '$', '€', '¥', 'Beli']).map((x) => [x, x]), f.currency, 'currency')}
-          ${f.currency === 'Beli' ? html`<p class="hint" style="margin-top:6px">Beli shows every amount ×1,000, so 100 shows as ${moneyText(100, 'Beli')}.</p>` : ''}</div>` : html`
+          ${f.currency === 'Beli' ? html`<p class="hint" style="margin-top:6px">Beli is counted in millions, like real bounties: everyone starts with ${moneyText(f.funds, 'Beli')}.</p>` : ''}</div>` : html`
         <div class="choice"><span class="label">Turn order</span>
           ${seg('order', 'turnOrder', [['join', 'Order of joining'], ['shuffle', 'Shuffle at start']], f.turnOrder)}</div>
         <div class="choice info-wrap ${state.tipOpen ? 'open' : ''}"><span class="label">Bin characters released from a hold?
@@ -1308,10 +1326,10 @@ function missingCharacter() {
   state.lastCharRefetch = now;
   emit('getCharacters').then((r) => { if (r.ok && r.list) { state.characters = { version: r.version, list: r.list }; render(); } });
 }
-// Money (R14.5): currency is display only. Beli shows every amount x1,000 with the ฿ sign.
+// Money (R14.5): currency is display only. Beli is counted in millions (27 Oct 2026): 100 shows as ฿100M.
 function moneyText(n, currency) {
   if (n == null) return '';
-  if (currency === 'Beli') return `฿${(Number(n) * 1000).toLocaleString('en-GB')}`;
+  if (currency === 'Beli') return `฿${Number(n)}M`;
   return `${currency || '£'}${n}`;
 }
 const money = (v, n) => moneyText(n, v.settings.currency);
@@ -1343,19 +1361,44 @@ function loadImage(id) {
   img.src = c.image;
 }
 
-function charCard(id, label, { selectable = false, choice = '', selected = false } = {}) {
+// Character cards are posters (27 Oct 2026): a wanted poster for pirates and everyone else, a star-rated
+// bounty sheet for Marines and the World Government. The tier stays visible on both. Each new character
+// drops in once; later re-renders (bids, timers) pick the animation up where it was instead of restarting.
+const CARD_ANIM_MS = 750;
+function cardEntrance(id, ms = CARD_ANIM_MS) {
+  if (id == null) return '';
+  state.cardSeen ??= new Map();
+  if (!state.cardSeen.has(id)) {
+    state.cardSeen.set(id, Date.now());
+    if (state.cardSeen.size > 80) state.cardSeen.delete(state.cardSeen.keys().next().value);
+  }
+  const elapsed = Date.now() - state.cardSeen.get(id);
+  return elapsed < ms ? raw(` enter" style="animation-delay:-${elapsed}ms`) : '';
+}
+function charCard(id, label, { selectable = false, choice = '', selected = false, bounty = null } = {}) {
   const c = charById().get(id);
   const showImg = c?.image && state.img.get(id) === 'ok';
+  const name = charName(id);
+  const tier = tierOf(id);
+  const kind = posterKind(name);
+  const initials = String(name).split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase();
+  const stars = kind === 'marine' ? html`<span class="poster-stars" aria-label="${STARS[tier]} of 4 stars">${'★'.repeat(STARS[tier])}<span class="dim">${'★'.repeat(4 - STARS[tier])}</span></span>` : '';
   const inner = html`
     ${label ? html`<span class="card-label">${label}</span>` : ''}
-    ${showImg ? html`<img src="${c.image}" alt="" referrerpolicy="no-referrer">` : ''}
-    <span class="card-name">${charName(id)}</span>
-    ${tierBadge(tierOf(id))}
-    ${c?.verse ? html`<span class="card-verse">${c.verse}</span>` : ''}`;
-  const tier = `tier-${tierOf(id)}`;
+    <span class="poster-sheet">
+      <span class="poster-head">${kind === 'marine' ? 'Bounty' : 'Wanted'}</span>
+      ${stars}
+      <span class="poster-photo">${showImg ? html`<img src="${c.image}" alt="" referrerpolicy="no-referrer">` : html`<span class="poster-initials" aria-hidden="true">${initials}</span>`}</span>
+      <span class="poster-sub">${kind === 'marine' ? 'Capture on sight' : 'Dead or alive'}</span>
+      <span class="card-name">${name}</span>
+      ${bounty != null ? html`<span class="poster-bounty">${bounty}</span>` : ''}
+      ${tierBadge(tier)}
+      ${c?.verse ? html`<span class="card-verse">${c.verse}</span>` : ''}
+    </span>`;
+  const cls = `char-card poster poster-${kind} tier-${tier}`;
   return selectable
-    ? html`<button class="char-card ${tier} selectable ${selected ? 'selected' : ''}" data-action="pickKeep" data-choice="${choice}" aria-pressed="${selected}">${inner}</button>`
-    : html`<div class="char-card ${tier}">${inner}</div>`;
+    ? html`<button class="${cls} selectable ${selected ? 'selected' : ''}${cardEntrance(id)}" data-action="pickKeep" data-choice="${choice}" aria-pressed="${selected}">${inner}</button>`
+    : html`<div class="${cls}${cardEntrance(id)}">${inner}</div>`;
 }
 
 function formation(v, pid, { interactive = false, compact = false } = {}) {
@@ -1450,6 +1493,13 @@ function countdownFor(deadline, total) {
 function countdown(v) { return countdownFor(v.draft.turn?.deadline, v.draft.timerMs); }
 
 function tickCountdown() {
+  for (const el of document.querySelectorAll('[data-going]')) {
+    const left = Number(el.dataset.going) - serverNow();
+    const hasLeader = el.dataset.hasLeader === '1';
+    const text = !hasLeader ? (left > 0 ? 'Be the first to bid' : '')
+      : left > 6000 ? '' : left > 3000 ? 'Going once…' : left > 1000 ? 'Going twice…' : left > 0 ? 'Last call!' : 'Sold!';
+    if (el.textContent !== text) { el.textContent = text; el.className = `going ${left <= 3000 && hasLeader ? 'hot' : ''}`; }
+  }
   for (const el of document.querySelectorAll('.countdown')) {
     const left = Math.max(0, Number(el.dataset.deadline) - serverNow());
     const total = Number(el.dataset.total) || 1;
@@ -1725,6 +1775,59 @@ function marketPanel(v, { trade = false } = {}) {
   </div>`;
 }
 
+// The bidding panel (27 Oct 2026): a big gavel button for the next bid, quick-jump chips, an
+// "all in", and a custom amount with − / + buttons. "Going once… twice…" counts down with the timer,
+// and the price bumps whenever a new bid lands. Being outbid flashes the panel (and buzzes on Android).
+function bidBoard(v, lot, me) {
+  const leader = lot.leader;
+  const mine = leader === v.you;
+  const min = lot.min;
+  const outbid = state.outbid?.lotId === lot.spin.id && !mine;
+  const status = !leader ? 'open' : mine ? 'winning' : outbid ? 'outbid' : 'rival';
+  const bumpKey = `${lot.spin.id}:${lot.bid}`;
+  if (state.bidBumpKey !== bumpKey) { state.bidBumpKey = bumpKey; state.bidBumpAt = Date.now(); }
+  const bumpEl = Date.now() - (state.bidBumpAt || 0);
+  const bump = leader && bumpEl < 450 ? raw(` bump" style="animation-delay:-${bumpEl}ms`) : '';
+  const headline = !leader ? html`Nobody has bid yet`
+    : mine ? html`You’re winning`
+      : outbid ? html`You’ve been outbid!`
+        : html`${pName(v, leader)} leads`;
+  if (!me) {
+    return html`<div class="bid-board ${status}"><div class="bid-status"><span class="bid-head">${headline}</span>
+      <strong class="bid-price${bump}">${leader ? money(v, lot.bid) : money(v, lot.price)}</strong></div>
+      <p class="going" data-going="${lot.deadline}" data-has-leader="${leader ? 1 : 0}"></p></div>`;
+  }
+  const canBid = !mine && min <= me.funds;
+  const jumps = [...new Set([min + 4, min + 9, me.funds])].filter((x) => x > min && x <= me.funds).slice(0, 3);
+  state.customBid = state.customBidLot === lot.spin.id ? Math.max(state.customBid || min, min) : min;
+  state.customBidLot = lot.spin.id;
+  const custom = Math.min(state.customBid, me.funds);
+  return html`<div class="bid-board ${status}">
+    <div class="bid-status">
+      <span class="bid-head">${headline}</span>
+      <strong class="bid-price${bump}">${leader ? money(v, lot.bid) : money(v, lot.price)}</strong>
+      <span class="bid-sub">${leader ? (mine ? 'Hold your nerve…' : `Next bid ${money(v, min)}`) : `Opening price · first bid wins it if nobody else bids`}</span>
+    </div>
+    <p class="going" data-going="${lot.deadline}" data-has-leader="${leader ? 1 : 0}"></p>
+    <button class="gavel-btn" data-action="auctionBid" data-amount="${min}" ${raw(canBid ? '' : 'disabled')}>
+      <svg class="gavel" viewBox="0 0 24 24" aria-hidden="true"><g transform="rotate(-40 12 11)"><rect x="5" y="2.5" width="13" height="6.5" rx="1.6"/><rect x="10.3" y="9" width="2.6" height="11.5" rx="1.2"/></g><rect x="2" y="20" width="12" height="2.6" rx="1.2"/></svg>
+      <span>${mine ? 'You’re top bidder' : leader ? `Bid ${money(v, min)}` : `Bid ${money(v, min)}`}</span>
+    </button>
+    ${!mine && jumps.length ? html`<div class="quick-bids" role="group" aria-label="Jump the bid">${jumps.map((x) => html`
+      <button class="chip-bid ${x === me.funds ? 'all-in' : ''}" data-action="auctionBid" data-amount="${x}"><small>${x === me.funds ? 'All in' : `+${x - (leader ? lot.bid : lot.price) }`}</small>${money(v, x)}</button>`)}</div>` : ''}
+    ${!mine && canBid ? html`<div class="custom-bid">
+      <span class="label">Pick your price</span>
+      <div class="stepper-bid">
+        <button class="btn" data-action="customStep" data-step="-1" aria-label="Lower" ${raw(custom <= min ? 'disabled' : '')}>−</button>
+        <output class="custom-amount" aria-live="polite">${money(v, custom)}</output>
+        <button class="btn" data-action="customStep" data-step="1" aria-label="Higher" ${raw(custom >= me.funds ? 'disabled' : '')}>+</button>
+        <button class="btn btn-primary" data-action="auctionBid" data-amount="${custom}">Bid</button>
+      </div>
+    </div>` : ''}
+    <p class="bid-wallet">${!mine && min > me.funds ? `You have ${money(v, me.funds)}: not enough for the next bid.` : `Your funds: ${money(v, me.funds)}`}</p>
+  </div>`;
+}
+
 function auctionScreen(v) {
   const a = v.auction;
   const lot = a.lot;
@@ -1740,23 +1843,17 @@ function auctionScreen(v) {
       const min = lot.min;
       const can = me && !mine && min <= me.funds;
       action = html`
-        ${charCard(lot.charId, `Opening price ${money(v, lot.price)}`)}
-        <p class="bid-now">${leader ? html`Top bid <strong>${money(v, lot.bid)}</strong> by ${mine ? 'you' : pName(v, leader)}` : 'No bids yet. First to bid pays the opening price.'}</p>
-        ${me ? html`
-          <button class="btn btn-primary btn-block bid-btn" data-action="auctionBid" data-amount="${min}" ${raw(can ? '' : 'disabled')}>${mine ? 'You hold the top bid' : leader ? `Raise to ${money(v, min)}` : `Bid ${money(v, min)}`}</button>
-          <form data-form="bidAmount" class="bid-amount">
-            <input type="number" id="bid-amount" min="${min}" max="${me.funds}" step="1" inputmode="numeric" placeholder="Or type an amount" aria-label="Bid amount${v.settings.currency === 'Beli' ? ' in thousands of Beli' : ''}" ${raw(mine ? 'disabled' : '')}>
-            <button class="btn btn-small" type="submit" ${raw(mine ? 'disabled' : '')}>Bid</button>
-          </form>
-          <p class="hint center">${!mine && min > me.funds ? `You have ${money(v, me.funds)}, not enough to bid.` : v.settings.currency === 'Beli' ? 'Type amounts in thousands: 12 means ฿12,000.' : `Raises go up by ${money(v, (lot.bid || lot.price) < 10 ? 1 : 2)}.`}</p>` : ''}`;
+        ${charCard(lot.charId, '', { bounty: leader ? money(v, lot.bid) : `Opens at ${money(v, lot.price)}` })}
+        ${bidBoard(v, lot, me)}`;
     }
   } else if (a.stage === 'placing' && a.pending) {
     action = a.pending.playerId === v.you
-      ? html`${charCard(a.pending.charId, `You won for ${money(v, a.pending.paid)}`)}<p class="prompt">Tap a role or bench spot in your squad.</p>`
-      : html`${charCard(a.pending.charId, `Sold to ${pName(v, a.pending.playerId)}`)}<p class="prompt">${pName(v, a.pending.playerId)} is placing ${charName(a.pending.charId)}.</p>`;
+      ? html`<div class="stamped">${charCard(a.pending.charId, '', { bounty: money(v, a.pending.paid) })}<span class="stamp sold${cardEntrance(`stamp:${a.pending.charId}`, 350)}">Sold to you</span></div><p class="prompt">Tap a role or bench spot in your squad.</p>`
+      : html`<div class="stamped">${charCard(a.pending.charId, '', { bounty: money(v, a.pending.paid) })}<span class="stamp sold${cardEntrance(`stamp:${a.pending.charId}`, 350)}">Sold</span></div><p class="prompt">${pName(v, a.pending.playerId)} won ${charName(a.pending.charId)} and is placing them.</p>`;
   } else if (a.stage === 'result') {
     const last = [...a.log].reverse().find((e) => ['won', 'unsold'].includes(e.kind));
-    action = last ? html`${charCard(last.charId, last.kind === 'won' ? `Sold to ${pName(v, last.playerId)} for ${money(v, last.amount)}` : 'Unsold: to the market')}` : '';
+    action = last ? html`<div class="stamped">${charCard(last.charId, '', { bounty: last.kind === 'won' ? money(v, last.amount) : null })}<span class="stamp ${last.kind === 'won' ? 'sold' : 'nosale'}${cardEntrance(`stamp:${last.charId}`, 350)}">${last.kind === 'won' ? `Sold to ${last.playerId === v.you ? 'you' : pName(v, last.playerId)}` : 'No sale'}</span></div>
+      <p class="prompt">${last.kind === 'won' ? `${last.playerId === v.you ? 'You' : pName(v, last.playerId)} won for ${money(v, last.amount)}.` : 'Nobody bid. Off to the market.'}</p>` : '';
   }
   return html`
     <header class="turn-banner">
@@ -1807,9 +1904,9 @@ function tradeBuilder(v) {
       <select data-change="tradeTo" aria-label="Player to trade with">${others.map((pid) => html`<option value="${pid}" ${raw(pid === d.to ? 'selected' : '')}>${pName(v, pid)}</option>`)}</select></label>
     <div class="offer-build">
       <div><span class="label">You give</span><div class="pick-list">${all(mine).map((id) => pick('give', id))}</div>
-        <label class="field funds-field"><span class="label">Plus funds${v.settings.currency === 'Beli' ? ' (thousands)' : ''}</span><input type="number" min="0" max="${mine?.funds ?? 0}" data-field="tradeGiveFunds" value="${state.form.tradeGiveFunds}" inputmode="numeric"></label></div>
+        <label class="field funds-field"><span class="label">Plus funds${v.settings.currency === 'Beli' ? ' (in millions, ฿M)' : ''}</span><input type="number" min="0" max="${mine?.funds ?? 0}" data-field="tradeGiveFunds" value="${state.form.tradeGiveFunds}" inputmode="numeric"></label></div>
       <div><span class="label">You get</span><div class="pick-list">${all(theirs).map((id) => pick('get', id))}</div>
-        <label class="field funds-field"><span class="label">Plus funds${v.settings.currency === 'Beli' ? ' (thousands)' : ''}</span><input type="number" min="0" data-field="tradeGetFunds" value="${state.form.tradeGetFunds}" inputmode="numeric"></label></div>
+        <label class="field funds-field"><span class="label">Plus funds${v.settings.currency === 'Beli' ? ' (in millions, ฿M)' : ''}</span><input type="number" min="0" data-field="tradeGetFunds" value="${state.form.tradeGetFunds}" inputmode="numeric"></label></div>
     </div>
     <button class="btn btn-primary" data-action="tradePropose" ${raw(d.to ? '' : 'disabled')}>Send offer</button>
     <p class="hint">They have 30 seconds to accept. One offer at a time.</p>

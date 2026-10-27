@@ -27,7 +27,7 @@ let g = null; // the game
 let wheel = null;
 
 function money(n) {
-  if (setup.currency === 'Beli') return `฿${(n * 1000).toLocaleString('en-GB')}`;
+  if (setup.currency === 'Beli') return `฿${n}M`;
   return `${setup.currency}${n}`;
 }
 const tierChip = (t) => `<span class="tier t-${t}">${t}</span>`;
@@ -41,7 +41,7 @@ function renderSetup() {
       <label class="field"><span class="label">Your name</span><input type="text" id="pv-name" value="${esc(setup.name)}" maxlength="20"></label>
       <div><span class="label">Funds per player</span>${pick('funds', [50, 60, 70, 80, 90, 100])}</div>
       <div><span class="label">Currency</span>${pick('currency', ['£', '$', '€', '¥', 'Beli'])}
-        <p class="hint" style="margin:6px 0 0">Beli shows every amount ×1,000: ${setup.funds} shows as ฿${(setup.funds * 1000).toLocaleString('en-GB')}.</p></div>
+        <p class="hint" style="margin:6px 0 0">Beli is counted in millions: everyone starts with ฿${setup.funds}M.</p></div>
       <div class="row2">
         <div><span class="label">Roles</span>${pick('roles', [5, 10])}</div>
         <div><span class="label">Computer players</span>${pick('bots', [2, 3, 4, 5])}</div>
@@ -184,7 +184,6 @@ const actions = {
   bidAmount() {
     const raw = document.getElementById('pv-amount').value.trim().replace(/[,฿£$€¥\s]/g, '');
     let n = Number(raw);
-    if (setup.currency === 'Beli' && n >= 1000) n /= 1000;
     flash(placeBid(you(), n));
   },
   slot(b) {
