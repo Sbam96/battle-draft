@@ -46,7 +46,7 @@ function savedRoom() {
     if (typeof raw.timer === 'string') out.timer = raw.timer;
     if (typeof raw.voteTimer === 'string') out.voteTimer = raw.voteTimer;
     if (['wheel', 'auction'].includes(raw.gameType)) out.gameType = raw.gameType;
-    if ([50, 60, 70, 80, 90, 100].includes(Number(raw.funds))) out.funds = Number(raw.funds);
+    if (fundsChoices(out.roleCount || 5).includes(Number(raw.funds))) out.funds = Number(raw.funds);
     if (['£', '$', '€', '¥', 'Beli'].includes(raw.currency)) out.currency = raw.currency;
     return out;
   } catch { return {}; }
@@ -464,6 +464,12 @@ const actions = {
   gameType(el) { state.form.gameType = el.value; render(); },
   currency(el) { state.form.currency = el.value; render(); },
   roleCount(el) {
+    // Funds follow team size (20 Nov 2026): switching size moves to the same step of the new range.
+    // (The form has already stored the new size by now, so the size the funds were picked for is kept separately.)
+    const from = fundsChoices(state.fundsForRoles ?? 5); const to = fundsChoices(Number(el.value));
+    const at = from.indexOf(Number(state.form.funds));
+    state.form.funds = to[at === -1 ? to.length - 1 : at];
+    state.fundsForRoles = Number(el.value);
     state.form.roleCount = Number(el.value);
     state.form.cap = Math.min(state.form.cap, state.config.maxPlayers[state.form.roleCount]);
     render();
@@ -821,6 +827,7 @@ function createScreen() {
   const timerOpts = [['off', 'Off'], ...state.config.timerOptions.map((x) => [String(x), `${x}s`])];
   const voteTimerOpts = [['off', 'Off'], ...(state.config.voteTimerOptions || [30, 60, 90, 120]).map((x) => [String(x), `${x}s`])];
   const auction = f.gameType === 'auction';
+  state.fundsForRoles ??= Number(f.roleCount);
   return html`
     ${back()}
     <header class="screen-head"><h2>Create a game</h2><p>Set the rules, then share the link with your friends.</p></header>
@@ -856,7 +863,7 @@ function createScreen() {
           </div></div>
         ${auction ? html`
         <div class="choice"><span class="label">Funds per player</span>
-          <div class="seg-3">${seg('funds', 'funds', (state.config.fundsOptions || [50, 60, 70, 80, 90, 100]).map((x) => [String(x), moneyText(x, f.currency)]), String(f.funds))}</div>
+          <div class="seg-3">${seg('funds', 'funds', fundsChoices(f.roleCount).map((x) => [String(x), moneyText(x, f.currency)]), String(f.funds))}</div>
           <p class="hint" style="margin-top:6px">Everyone starts with the same amount. Bidding closes 10 seconds after the last bid.</p></div>
         <div class="choice"><span class="label">Currency</span>
           ${seg('cur', 'currency', (state.config.currencies || ['£', '$', '€', '¥', 'Beli']).map((x) => [x, x]), f.currency, 'currency')}
@@ -1343,6 +1350,8 @@ function missingCharacter() {
   state.lastCharRefetch = now;
   emit('getCharacters').then((r) => { if (r.ok && r.list) { state.characters = { version: r.version, list: r.list }; render(); } });
 }
+// Funds per player (R14.4, 20 Nov 2026): 10-20 per role. 5 roles: 50-100; 10 roles: 100-200.
+function fundsChoices(roleCount) { return [10, 12, 14, 16, 18, 20].map((x) => x * (Number(roleCount) === 10 ? 10 : 5)); }
 // Money (R14.5): currency is display only. Beli is counted in millions (27 Oct 2026): 100 shows as ฿100M.
 function moneyText(n, currency) {
   if (n == null) return '';

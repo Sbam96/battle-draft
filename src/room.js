@@ -4,7 +4,7 @@
 import {
   ROLE_COUNTS, MIN_PLAYERS, NAME_MAX, ROLE_NAME_MAX, ROOM_NAME_MAX,
   PLACEMENT_TIMER_OPTIONS, VOTE_TIMER_OPTIONS, maxPlayersFor, minimumPool,
-  GAME_TYPES, FUNDS_OPTIONS, CURRENCIES, auctionLotSize,
+  GAME_TYPES, fundsOptionsFor, CURRENCIES, auctionLotSize,
 } from './config.js';
 import { parseText, mergeCharacters } from './characters.js';
 import { isTier, tierOrDefault } from './tiers.js';
@@ -77,11 +77,12 @@ export function validateSettings(input = {}) {
     throw new GameError('VOTE_TIMER', 'Pick a voting timer from the list.');
   }
 
-  // R14.4, R14.5: auction funds (50-100 in steps of 10, default 100) and the currency shown.
+  // R14.4, R14.5: auction funds (10-20 per role, default the top amount) and the currency shown.
   let funds = null; let currency = null;
   if (gameType === 'auction') {
-    funds = input.funds == null || input.funds === '' ? 100 : Number(input.funds);
-    if (!FUNDS_OPTIONS.includes(funds)) throw new GameError('FUNDS', 'Pick funds of 50, 60, 70, 80, 90 or 100.');
+    const options = fundsOptionsFor(roleCount);
+    funds = input.funds == null || input.funds === '' ? options.at(-1) : Number(input.funds);
+    if (!options.includes(funds)) throw new GameError('FUNDS', `Pick funds of ${options.slice(0, -1).join(', ')} or ${options.at(-1)}.`);
     currency = input.currency == null || input.currency === '' ? '£' : input.currency;
     if (!CURRENCIES.includes(currency)) throw new GameError('CURRENCY', 'Pick £, $, €, ¥ or Beli.');
   }

@@ -439,3 +439,12 @@ test('R17.7 in a room: a player sells mid-auction over the auction action', () =
   assert.ok(r.auction.players.get(a0).funds > funds);
   assert.equal(code(() => r.auctionAction(a0, 'sell', { slot: { area: 'bench', index: 0 } }, T0)), 'BAD_SLOT');
 });
+
+// ---------- 20 Nov 2026: funds scale with team size ----------
+test('T14.04a 10 roles: funds 100–200 in steps of 20, default 200; 5-role amounts are refused', () => {
+  const ten = { roleCount: 10, roles: Array.from({ length: 10 }, (_, i) => `Role ${i + 1}`) };
+  assert.equal(validateSettings(base(ten)).funds, 200);
+  assert.equal(validateSettings(base({ ...ten, funds: 140 })).funds, 140);
+  for (const funds of [50, 90, 130, 220]) assert.equal(code(() => validateSettings(base({ ...ten, funds }))), 'FUNDS');
+  assert.equal(code(() => validateSettings(base({ funds: 200 }))), 'FUNDS', '200 is not a 5-role amount');
+});
