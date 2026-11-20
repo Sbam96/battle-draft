@@ -22,12 +22,16 @@ export function sendError(res, err) {
   return res.status(503).json({ code: 'POOL_DOWN', message: 'The community pool isn’t reachable right now. Try again in a moment.' });
 }
 
-export function mountPool(app, { pool }) {
+export function mountPool(app, { pool, configured = () => false }) {
   const r = express.Router();
   r.use(express.json({ limit: '1.5mb' }));
   r.use((req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
-    if (!pool()) return res.status(503).json({ code: 'POOL_OFF', message: 'The community pool isn’t set up yet.' });
+    if (!pool()) {
+      return configured()
+        ? res.status(503).json({ code: 'POOL_STARTING', message: 'The community pool is waking up. One moment…' })
+        : res.status(503).json({ code: 'POOL_OFF', message: 'The community pool isn’t set up yet.' });
+    }
     next();
   });
   const limit = writeLimiter();

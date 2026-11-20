@@ -101,7 +101,22 @@ const state = {
   },
 };
 
-fetch('/config').then((r) => r.json()).then((c) => { state.config = c; render(); }).catch(() => {});
+// What the server offers (asked again on every reconnect, so a server that has just woken up is re-checked).
+function loadConfig() { fetch('/config').then((r) => r.json()).then((c) => { state.config = c; render(); }).catch(() => {}); }
+loadConfig();
+socket.on('connect', loadConfig);
+
+// The pool's list of anime. The free server can be waking up (it sleeps when idle), so for up to about
+// 40 seconds a "waking up" answer is retried rather than shown as an error (20 Nov 2026).
+async function poolVerses(onWaiting) {
+  for (let i = 0; i < 20; i += 1) {
+    const r = await api('/api/pool/verses');
+    if (r.ok || !['POOL_STARTING', 'POOL_DOWN'].includes(r.code)) return r;
+    onWaiting?.();
+    await new Promise((res) => setTimeout(res, 2000));
+  }
+  return { ok: false, message: 'The community pool didn’t answer. Refresh the page to try again.' };
+}
 
 // JSON calls to the pool endpoints. Always resolves to { ok, ...body } with a readable message on failure.
 async function api(path, body) {
@@ -387,7 +402,8 @@ const actions = {
     setPath('/pool');
     go('pool');
     state.pool.verseId = null;
-    const r = await api('/api/pool/verses');
+    const r = await poolVerses(() => { state.pool.error = ''; state.pool.waking = true; render(); });
+    state.pool.waking = false;
     state.pool.loaded = true;
     state.pool.error = r.ok ? '' : r.message;
     state.pool.verses = r.verses || [];
@@ -419,7 +435,8 @@ const actions = {
   // ---- lobby: load from the pool ----
   async lobbyPoolTab() {
     state.charTab = 'pool'; state.charTabChosen = true; state.importResult = null; render();
-    const r = await api('/api/pool/verses');
+    const r = await poolVerses(() => { state.lobbyPool.waking = true; render(); });
+    state.lobbyPool.waking = false;
     state.lobbyPool.verses = r.ok ? r.verses : [];
     state.lobbyPool.error = r.ok ? '' : r.message;
     render();
@@ -1001,7 +1018,7 @@ function poolScreen() {
   const p = state.pool;
   const verse = p.verses.find((x) => x.id === p.verseId);
   let main;
-  if (!p.loaded) main = html`<p class="why center">Loading…</p>`;
+  if (!p.loaded) main = html`<p class="why center">${p.waking ? 'Waking up the community pool… this takes a few seconds after a quiet spell.' : 'Loading…'}</p>`;
   else if (!p.verses.length) main = html`<div class="panel notice"><p>${p.error || 'The pool is empty.'}</p></div>`;
   else if (!verse) {
     main = html`<div class="verse-grid">${p.verses.map((x) => html`
@@ -1167,9 +1184,9 @@ function lobbyPoolBody() {
   if (lp.verses === null) {
     if (!lp.fetching) {
       lp.fetching = true;
-      api('/api/pool/verses').then((r) => { lp.fetching = false; lp.verses = r.ok ? r.verses : []; lp.error = r.ok ? '' : r.message; render(); });
+      poolVerses(() => { lp.waking = true; render(); }).then((r) => { lp.fetching = false; lp.waking = false; lp.verses = r.ok ? r.verses : []; lp.error = r.ok ? '' : r.message; render(); });
     }
-    return html`<p class="hint" style="margin-top:12px">Loading the community pool…</p>`;
+    return html`<p class="hint" style="margin-top:12px">${lp.waking ? 'Waking up the community pool… this takes a few seconds after a quiet spell.' : 'Loading the community pool…'}</p>`;
   }
   if (lp.error) return html`<p class="error-text">${lp.error}</p>`;
   const quick = QUICK.map((n) => lp.verses.find((x) => x.name === n)).filter(Boolean);

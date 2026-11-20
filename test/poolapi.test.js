@@ -124,3 +124,28 @@ test('API8 without a database the game still runs and the pool says it is off', 
   assert.equal((await r.json()).code, 'POOL_OFF');
   await new Promise((r2) => s.io.close(r2));
 });
+
+// ---------- 20 Nov 2026: the server has just woken up and the database isn't connected yet ----------
+test('PW1 a configured pool shows as available while the database is still connecting, and its API says "waking up"', async () => {
+  const { createApp } = await import('../src/server.js');
+  const s = createApp();
+  s.poolConfigured();
+  await new Promise((r) => s.http.listen(0, r));
+  const base = `http://localhost:${s.http.address().port}`;
+  const cfg = await (await fetch(`${base}/config`)).json();
+  assert.equal(cfg.pool, true);
+  assert.equal(cfg.poolState, 'starting');
+  const res = await fetch(`${base}/api/pool/verses`);
+  assert.equal(res.status, 503);
+  assert.equal((await res.json()).code, 'POOL_STARTING');
+  await new Promise((r) => s.io.close(r));
+});
+test('PW2 with no database address at all, the pool stays hidden', async () => {
+  const { createApp } = await import('../src/server.js');
+  const s = createApp();
+  await new Promise((r) => s.http.listen(0, r));
+  const cfg = await (await fetch(`http://localhost:${s.http.address().port}/config`)).json();
+  assert.equal(cfg.pool, false);
+  assert.equal(cfg.poolState, 'off');
+  await new Promise((r) => s.io.close(r));
+});

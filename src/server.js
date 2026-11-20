@@ -76,7 +76,8 @@ export function createApp({
   admin = { username: process.env.ADMIN_USERNAME, password: process.env.ADMIN_PASSWORD },
   db = null, // an open database for the community pool, or null to run without it
 } = {}) {
-  const poolRef = { store: db ? new PoolStore(db) : null };
+  // configured: a database address exists, so the pool is coming even if it is still connecting (20 Nov 2026).
+  const poolRef = { store: db ? new PoolStore(db) : null, configured: Boolean(db) };
   const pool = () => poolRef.store;
   const app = express();
   const http = createServer(app);
@@ -104,8 +105,8 @@ export function createApp({
   const sendIndex = (req, res) => { res.setHeader('Cache-Control', 'no-cache'); res.type('html').send(indexHtml); };
   app.get(['/', '/index.html', '/r/:id', '/j/:code', '/pool', '/contact'], sendIndex);
   app.use(express.static(PUBLIC_DIR, { index: false, setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache') }));
-  app.get('/config', (req, res) => res.json({ maxPlayers: { 5: maxPlayersFor(5), 10: maxPlayersFor(10) }, timerOptions: PLACEMENT_TIMER_OPTIONS, voteTimerOptions: VOTE_TIMER_OPTIONS, fundsOptions: FUNDS_OPTIONS, currencies: CURRENCIES, pool: Boolean(pool()) }));
-  mountPool(app, { pool });
+  app.get('/config', (req, res) => res.json({ maxPlayers: { 5: maxPlayersFor(5), 10: maxPlayersFor(10) }, timerOptions: PLACEMENT_TIMER_OPTIONS, voteTimerOptions: VOTE_TIMER_OPTIONS, fundsOptions: FUNDS_OPTIONS, currencies: CURRENCIES, pool: Boolean(pool()) || poolRef.configured, poolState: pool() ? 'on' : poolRef.configured ? 'starting' : 'off' }));
+  mountPool(app, { pool, configured: () => poolRef.configured });
   app.get('/health', (req, res) => res.json({ ok: true, rooms: rooms.size }));
   // QR code for a room's invite link (26 Oct 2026). Only for rooms that exist.
   app.get('/qr/:id.svg', async (req, res) => {
@@ -484,7 +485,8 @@ export function createApp({
     });
   });
 
-  return { app, http, io, rooms, reports, attachDb: (d) => { poolRef.store = d ? new PoolStore(d) : null; } };
+  return { app, http, io, rooms, reports, attachDb: (d) => { poolRef.store = d ? new PoolStore(d) : null; if (d) poolRef.configured = true; },
+    poolConfigured: () => { poolRef.configured = true; } };
 }
 
 // Run directly: `node src/server.js`
@@ -502,6 +504,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.log(`[pool] DATABASE_URL not set: community pool switched off. Secret files: ${files.join(', ') || 'none'}. Related variable names: ${vars.join(', ') || 'none'}`);
   }
   else {
+    app.poolConfigured(); // pages show the pool straight away; it answers once the database does
     const connect = async (attempt = 1) => {
       try {
         app.attachDb(await openDb(url));
