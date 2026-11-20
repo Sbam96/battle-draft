@@ -1,5 +1,5 @@
 // Auction (iteration 2, sections 14 and 16). The server runs everything; screens only show it.
-//  - The lot is drawn by the room (roles x players + 20%). One character at a time is spun from what's left.
+//  - The lot is drawn by the room (roles x players + 30%). One character at a time is spun from what's left.
 //  - Once the wheel stops, anyone can bid. The first bid is the tier price; raises are +1 under 10 and +2
 //    from 10 (or any larger whole amount). The 10-second timer starts at the first bid and restarts on each bid.
 //    No bid within 10 seconds of landing: unsold, to the market.
@@ -52,6 +52,7 @@ export class Auction {
 
   owned(pid) { const p = this.players.get(pid); return p ? [...p.roles, ...p.bench].filter((x) => x != null) : []; }
   isFull(pid) { return this.owned(pid).length === this.roleCount + BENCH_SPOTS; }
+  rolesFull(pid) { const p = this.players.get(pid); return Boolean(p) && p.roles.every((x) => x != null); }
 
   begin(now) { this.#spin(now); }
 

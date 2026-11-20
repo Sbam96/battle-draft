@@ -18,11 +18,13 @@ export function minimumPool(players, roles) {
   return Math.ceil((players * (roles + 3) * 11) / 10);
 }
 
-// Auction (R14.7): the lot is roles x players + 20%, rounded up. Integer maths again.
+// Auction (R14.7, changed 20 Nov 2026): the lot is roles x players + 30%, rounded up. Integer maths again.
 export function auctionLotSize(players, roles) {
-  return Math.ceil((players * roles * 12) / 10);
+  return Math.ceil((players * roles * 13) / 10);
 }
 export const GAME_TYPES = ['wheel', 'auction'];
+// R9.7: a role whose name includes the word Traitor flips its pairing: the stronger character loses.
+export const isTraitorRole = (name) => /\btraitors?\b/i.test(String(name || ''));
 // R14.4 (changed 20 Nov 2026): funds scale with team size, 10-20 per role. 5 roles: 50-100 in steps of 10;
 // 10 roles: 100-200 in steps of 20. The default is the top amount.
 export const fundsOptionsFor = (roleCount) => [10, 12, 14, 16, 18, 20].map((perRole) => perRole * roleCount);

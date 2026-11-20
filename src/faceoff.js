@@ -18,8 +18,11 @@ export const ABSENT_VOTER_MS = 30_000; // how long voting waits for voters who a
 
 export class Faceoff {
   // ctx: { players: () => [{ id, connected }], hostId: () => id }
-  constructor({ order, teams, roleCount, ctx, voteSeconds = 0, random = (n) => randomInt(n) }) {
+  constructor({ order, teams, roleCount, ctx, voteSeconds = 0, traitorRoles = [], random = (n) => randomInt(n) }) {
     this.roleCount = roleCount;
+    // R9.7: in a Traitor role the stronger character loses. Voters and judges still pick the stronger one;
+    // the result is flipped when scoring. An empty Traitor role still loses (a gap never scores).
+    this.traitor = new Set(traitorRoles);
     this.voteLimitMs = voteSeconds > 0 ? voteSeconds * 1000 : 0; // 0 = no voting timer
     this.voteMs = this.voteLimitMs || ABSENT_VOTER_MS;
     this.ctx = ctx;
@@ -83,7 +86,7 @@ export class Faceoff {
     const pairings = Array.from({ length: this.roleCount }, (_, i) => {
       const ca = ta[i]; const cb = tb[i];
       const auto = ca != null && cb != null ? null : ca != null ? 'a' : cb != null ? 'b' : 'none';
-      return { role: i, a: ca, b: cb, auto, winner: auto === 'none' ? null : auto, votes: null };
+      return { role: i, a: ca, b: cb, auto, winner: auto === 'none' ? null : auto, votes: null, traitor: this.traitor.has(i), stronger: null };
     });
     this.match = { id: meta.id, a, b, stage: 'voting', pairings, ballots: new Map(), deadline: null, voteEndsAt: this.voteLimitMs ? now + this.voteLimitMs : null, judge: null, startedAt: now, paused: null };
     if (!pairings.some((p) => p.auto === null)) this.#resolveVotes(now);
@@ -153,12 +156,15 @@ export class Faceoff {
       let a = 0; let b = 0;
       for (const ballot of m.ballots.values()) { if (ballot[p.role] === 'a') a += 1; else if (ballot[p.role] === 'b') b += 1; }
       p.votes = { a, b };
-      p.winner = a > b ? 'a' : b > a ? 'b' : null;
+      p.stronger = a > b ? 'a' : b > a ? 'b' : null;
+      p.winner = this.#fromStronger(p, p.stronger);
       if (a === b) ties.push(p.role);
     }
     if (ties.length) this.#askJudge('pairings', ties, now);
     else this.#score(now);
   }
+
+  #fromStronger(p, side) { return side && p.traitor ? (side === 'a' ? 'b' : 'a') : side; }
 
   #score(now) {
     const m = this.match;
@@ -251,7 +257,7 @@ export class Faceoff {
     if (m.judge.id !== pid) throw new DraftError('NOT_JUDGE', 'You’re not the judge for this decision.');
     if (m.judge.kind === 'pairings') {
       for (const r of m.judge.roles) if (decision?.[r] !== 'a' && decision?.[r] !== 'b') throw new DraftError('INCOMPLETE', 'Decide every tied pairing.');
-      for (const r of m.judge.roles) { m.pairings[r].winner = decision[r]; m.pairings[r].judged = true; }
+      for (const r of m.judge.roles) { const p = m.pairings[r]; p.stronger = decision[r]; p.winner = this.#fromStronger(p, decision[r]); p.judged = true; }
       m.judge.decided = true;
       this.#score(now);
     } else {
@@ -333,7 +339,7 @@ export class Faceoff {
         paused: Boolean(m.paused), waitingFor: m.paused ? this.#neutrals() : [],
         noJudge: Boolean(m.noJudge), coinToss: Boolean(m.coinToss),
         score: m.score ?? null, walkover: Boolean(m.walkover), judged: Boolean(m.judged),
-        pairings: m.pairings.map((p) => ({ role: p.role, a: p.a, b: p.b, auto: p.auto, winner: showVotes ? p.winner : null, votes: showVotes ? p.votes : null, judged: Boolean(p.judged) })),
+        pairings: m.pairings.map((p) => ({ role: p.role, a: p.a, b: p.b, auto: p.auto, traitor: Boolean(p.traitor), stronger: showVotes ? p.stronger ?? null : null, winner: showVotes ? p.winner : null, votes: showVotes ? p.votes : null, judged: Boolean(p.judged) })),
         voted: [...(m.ballots?.keys() || [])].filter((id) => !m.ballots.get(id).standIn),
         voters: this.eligibleVoters(),
         myBallot: m.ballots?.get(forPlayer) && !m.ballots.get(forPlayer).standIn ? m.ballots.get(forPlayer) : null,

@@ -691,3 +691,69 @@ select:focus-visible { outline: 3px solid var(--pink); outline-offset: 1px; }
 @media (max-width: 899px) {
   .wheel-col.wheel-done #wheel-slot { display: none; }
 }
+
+/* R9.7: Traitor role, the stronger character loses */
+.pairings tbody th small.traitor-tag { color: #c0392b; font-weight: 700; letter-spacing: 0.02em; }
+
+/* ---------- Poster frames (20 Nov 2026) ----------
+   Calligraphic corner scrolls, an inner double rule and a flourish under the heading. Script lettering for
+   the heading and the "Dead or Alive" line; the corner jewels and the centre diamond carry the tier colour. */
+.poster-sheet { padding: 22px 22px 20px; }
+.poster-sheet::before {
+  content: ''; position: absolute; inset: 7px; pointer-events: none;
+  border: 3px double currentColor; border-radius: 2px; opacity: 0.45;
+}
+.poster-corner { position: absolute; width: 50px; height: 50px; pointer-events: none; }
+.poster-side { position: absolute; top: 50%; width: 12px; height: 84px; margin-top: -42px; pointer-events: none; }
+.poster-side svg { display: block; width: 100%; height: 100%; }
+.poster-side.l { left: 1px; } .poster-side.r { right: 1px; transform: scaleX(-1); }
+.poster-rule.foot { width: 60%; margin: 0 auto -2px; transform: scaleY(-1); }
+.poster-corner svg { display: block; width: 100%; height: 100%; }
+.poster-corner.tl { top: 3px; left: 3px; }
+.poster-corner.tr { top: 3px; right: 3px; transform: scaleX(-1); }
+.poster-corner.bl { bottom: 3px; left: 3px; transform: scaleY(-1); }
+.poster-corner.br { bottom: 3px; right: 3px; transform: scale(-1, -1); }
+.poster-rule { display: block; width: 78%; margin: -2px auto 0; }
+.poster-rule svg { display: block; width: 100%; height: auto; }
+.poster-wanted .poster-head { font-family: 'Pirata One', 'Dela Gothic One', Georgia, serif; font-size: 2.6rem; letter-spacing: 0.06em; text-transform: none; font-weight: 400; }
+.poster-marine .poster-head { font-family: 'Pirata One', 'Dela Gothic One', Georgia, serif; font-size: 2.1rem; letter-spacing: 0.14em; text-transform: none; }
+.poster-sub { font-family: 'Pinyon Script', 'Snell Roundhand', cursive; font-size: 1.35rem; font-weight: 400; letter-spacing: 0.02em; text-transform: none; line-height: 1.1; }
+.poster-wanted .poster-photo { border-style: double; border-width: 5px; }
+.poster-marine .poster-photo { border-width: 2px; box-shadow: 0 0 0 3px var(--sheet), 0 0 0 4px currentColor; }
+.poster-marine .poster-corner { opacity: 0.75; }
+.compare .poster-head { font-size: 1.7rem; }
+.compare .poster-corner { width: 34px; height: 34px; }
+.compare .poster-side { height: 60px; margin-top: -30px; width: 9px; }
+.compare .poster-sub { font-size: 1.1rem; }
+
+/* ---------- Auction lot column (20 Nov 2026) ---------- */
+.lot-col h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 0 6px; }
+.lot-col h3 small { font-size: 0.8rem; color: var(--muted); font-weight: 500; }
+.lot-tiers { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 10px; font-size: 0.85rem; font-weight: 700; }
+.lot-tiers > span { display: inline-flex; align-items: center; gap: 4px; }
+.lot-dot { width: 10px; height: 10px; border-radius: 50%; background: linear-gradient(135deg, var(--t1), var(--t2)); border: 1.5px solid #1b1530; flex: none; }
+.lot-list { list-style: none; margin: 0; padding: 0; }
+.lot-row { display: flex; align-items: center; gap: 8px; padding: 5px 2px; border-bottom: 1px dashed var(--paper-2); font-size: 0.9rem; }
+.lot-row:last-child { border-bottom: 0; }
+.lot-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lot-price { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+.lot-row.now { background: color-mix(in srgb, var(--t1) 25%, transparent); border-radius: 6px; padding: 6px 8px; font-weight: 700; border: 0; }
+.lot-now-label { margin: 0 0 4px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.lot-now-label + .lot-list { margin-bottom: 10px; }
+/* Phones and tablets: the lot sits under the bidding, so the bid controls stay on screen. */
+.auction-grid > .lot-col { order: 2; }
+.auction-grid > .wheel-col { order: 1; }
+.auction-grid > .team-col { order: 3; }
+.auction-grid > .lot-col .lot-list { max-height: 260px; overflow-y: auto; }
+/* Wide screens: lot on the left, wheel and bidding in the middle, squads on the right. */
+@media (min-width: 1100px) {
+  #app.wide:has(.auction-grid) { max-width: 1320px; }
+  #app.wide .draft-grid.auction-grid { grid-template-columns: 250px minmax(0, 1fr) minmax(0, 1fr); }
+  .auction-grid > .lot-col { order: 0; position: sticky; top: 20px; }
+  .auction-grid > .lot-col .lot-list { max-height: calc(100vh - 200px); }
+}
+@media (min-width: 900px) and (max-width: 1099px) {
+  #app.wide .draft-grid.auction-grid > .wheel-col { grid-column: 1; grid-row: 1; position: static; }
+  #app.wide .draft-grid.auction-grid > .lot-col { grid-column: 1; grid-row: 2; }
+  #app.wide .draft-grid.auction-grid > .team-col { grid-column: 2; grid-row: 1 / span 2; }
+}

@@ -850,7 +850,8 @@ function createScreen() {
         <div class="field"><span class="label">Role names <small>— in team order</small></span>
           <ol class="roles">${f.roles.slice(0, f.roleCount).map((r, i) => html`
             <li><span class="pos" aria-hidden="true">${i + 1}</span>
-              <input type="text" data-field="roles.${i}" value="${r}" maxlength="30" aria-label="Role ${i + 1}" placeholder="e.g. ${ROLE_HINTS[i]}"></li>`)}</ol></div>
+              <input type="text" data-field="roles.${i}" value="${r}" maxlength="30" aria-label="Role ${i + 1}" placeholder="e.g. ${ROLE_HINTS[i]}"></li>`)}</ol>
+          <p class="hint">Name a role Traitor and the stronger character loses that pairing in the tournament.</p></div>
       </section>
 
       <section class="panel">
@@ -1373,17 +1374,23 @@ const charName = (id) => {
 };
 const pName = (v, id) => v.names?.[id] ?? 'A player';
 
-// R7.4: load an image in the background; give up after 4 seconds and show the name instead.
-function loadImage(id) {
+// R7.4: load an image in the background and show the name until it arrives. A slow image is not given up
+// on: it appears whenever it finishes (20 Nov 2026 fix: a 4-second cut-off used to mark slow images as
+// broken for the rest of the session, so one player saw names while everyone else saw pictures).
+// A failed image is tried once more a few seconds later before falling back to the name for good.
+function loadImage(id, attempt = 0) {
   const c = charById().get(id);
-  if (!c?.image || state.img.has(id)) return;
+  if (!c?.image) return;
+  if (attempt === 0 && state.img.has(id)) return;
   state.img.set(id, 'loading');
   const img = new Image();
   img.referrerPolicy = 'no-referrer';
-  const done = (ok) => { if (state.img.get(id) !== 'loading') return; state.img.set(id, ok ? 'ok' : 'fail'); render(); };
-  img.onload = () => done(true);
-  img.onerror = () => done(false);
-  setTimeout(() => done(false), 4000);
+  img.decoding = 'async';
+  img.onload = () => { state.img.set(id, 'ok'); render(); };
+  img.onerror = () => {
+    if (attempt === 0) { setTimeout(() => loadImage(id, 1), 5000); return; }
+    state.img.set(id, 'fail');
+  };
   img.src = c.image;
 }
 
@@ -1401,6 +1408,23 @@ function cardEntrance(id, ms = CARD_ANIM_MS) {
   const elapsed = Date.now() - state.cardSeen.get(id);
   return elapsed < ms ? raw(` enter" style="animation-delay:-${elapsed}ms`) : '';
 }
+// Poster frame (20 Nov 2026): hand-drawn calligraphic scrolls in each corner and a flourish under the
+// heading. Original artwork, drawn here; the ink follows the poster, the small jewels take the tier colour.
+const CORNER_SVG = `<svg viewBox="0 0 48 48" aria-hidden="true" focusable="false"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="2">
+  <path d="M3 45V14Q3 3 14 3H45"/><path d="M7 41V16Q7 7 16 7H41" stroke-width="0.8"/>
+  <path d="M11 36C11 22 17 16 25 14.5C31 13.4 33.5 18.5 29.5 21.5C26.5 23.6 23 21 25 18.6"/>
+  <path d="M36 11C22 11 16 17 14.5 25C13.4 31 18.5 33.5 21.5 29.5C23.6 26.5 21 23 18.6 25"/>
+  <path d="M11 36C10 40 8 42 5 43" stroke-width="1"/><path d="M36 11C40 10 42 8 43 5" stroke-width="1"/></g>
+  <circle cx="10.5" cy="10.5" r="2.6" fill="var(--t1, currentColor)" stroke="currentColor" stroke-width="0.8"/></svg>`;
+const SIDE_SVG = `<svg viewBox="0 0 14 90" aria-hidden="true" focusable="false"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.3">
+  <path d="M7 2C7 14 2 18 2 26C2 32 8 33 9 29C10 26 6 24 5 27"/><path d="M7 88C7 76 2 72 2 64C2 58 8 57 9 61C10 64 6 66 5 63"/>
+  <path d="M7 34V40M7 50V56" stroke-width="0.9"/></g><path d="M7 39.5L11 45L7 50.5L3 45Z" fill="var(--t1, currentColor)" stroke="currentColor" stroke-width="0.9"/></svg>`;
+const POSTER_CORNERS = ['tl', 'tr', 'bl', 'br'].map((c) => `<span class="poster-corner ${c}">${CORNER_SVG}</span>`).join('')
+  + ['l', 'r'].map((c) => `<span class="poster-side ${c}">${SIDE_SVG}</span>`).join('');
+const POSTER_RULE = `<span class="poster-rule" aria-hidden="true"><svg viewBox="0 0 160 14" focusable="false"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.3">
+  <path d="M4 7C24 7 30 2 42 3.5C52 4.8 50 11 43.5 10C39 9.3 40.5 5 44 6"/><path d="M156 7C136 7 130 2 118 3.5C108 4.8 110 11 116.5 10C121 9.3 119.5 5 116 6"/>
+  <path d="M56 7H70M90 7H104" stroke-width="0.9"/></g><path d="M80 1.5L85.5 7L80 12.5L74.5 7Z" fill="var(--t1, currentColor)" stroke="currentColor" stroke-width="1"/></svg></span>`;
+
 function charCard(id, label, { selectable = false, choice = '', selected = false, bounty = null } = {}) {
   const c = charById().get(id);
   const showImg = c?.image && state.img.get(id) === 'ok';
@@ -1412,12 +1436,15 @@ function charCard(id, label, { selectable = false, choice = '', selected = false
   const inner = html`
     ${label ? html`<span class="card-label">${label}</span>` : ''}
     <span class="poster-sheet">
+      ${raw(POSTER_CORNERS)}
       <span class="poster-head">${kind === 'marine' ? 'Bounty' : 'Wanted'}</span>
+      ${raw(POSTER_RULE)}
       ${stars}
       <span class="poster-photo">${showImg ? html`<img src="${c.image}" alt="" referrerpolicy="no-referrer">` : html`<span class="poster-initials" aria-hidden="true">${initials}</span>`}</span>
-      <span class="poster-sub">${kind === 'marine' ? 'Capture on sight' : 'Dead or alive'}</span>
+      <span class="poster-sub">${kind === 'marine' ? 'Capture on sight' : 'Dead or Alive'}</span>
       <span class="card-name">${name}</span>
       ${bounty != null ? html`<span class="poster-bounty">${bounty}</span>` : ''}
+      ${raw(POSTER_RULE.replace('poster-rule', 'poster-rule foot'))}
       ${tierBadge(tier)}
       ${c?.verse ? html`<span class="card-verse">${c.verse}</span>` : ''}
     </span>`;
@@ -1700,6 +1727,7 @@ function endPhaseScreen(v) {
 const SLOT_AREAS = ['roles', 'bench'];
 const squadOf = (v, pid) => v.auction?.players?.[pid] || null;
 const ownedCount = (sq) => (sq ? [...sq.roles, ...sq.bench].filter((x) => x != null).length : 0);
+const rolesFull = (v, pid) => { const sq = squadOf(v, pid); return Boolean(sq) && sq.roles.every((x) => x != null); };
 const squadFull = (v, pid) => { const sq = squadOf(v, pid); return Boolean(sq) && ownedCount(sq) === sq.roles.length + sq.bench.length; };
 const slotLabel = (v, area, i) => (area === 'roles' ? v.settings.roles[i] : `Bench ${i + 1}`);
 const chip = (id, extra = '') => html`<span class="sq-chip tier-${tierOf(id)} ${extra}">${charName(id)}</span>`;
@@ -1747,7 +1775,7 @@ function squadPanel(v, { mode = '' } = {}) {
     const moving = state.moveFrom === key;
     let btns = '';
     if (placing) btns = html`<button class="btn btn-small btn-primary" data-action="auctionPlace" data-area="${area}" data-i="${i}">${id ? 'Replace' : 'Place here'}</button>`;
-    else if (buying) btns = id ? html`<button class="btn btn-small btn-primary" data-action="marketBuy" data-area="${area}" data-i="${i}">Swap out</button>` : '';
+    else if (buying) btns = id || area === 'bench' ? html`<button class="btn btn-small btn-primary" data-action="marketBuy" data-area="${area}" data-i="${i}">${id ? 'Swap out' : 'Put here'}</button>` : '';
     else {
       const move = state.moveFrom
         ? html`<button class="btn btn-small ${moving ? 'btn-primary' : ''}" data-action="squadMove" data-area="${area}" data-i="${i}">${moving ? 'Cancel' : 'Move here'}</button>`
@@ -1766,7 +1794,7 @@ function squadPanel(v, { mode = '' } = {}) {
   };
   return html`<div class="panel"><h3>Your squad <small>${money(v, sq.funds)} left</small></h3>
     ${placing ? html`<p class="place-prompt">You won ${charName(a.pending.charId)}. Tap where they go${squadFull(v, v.you) ? '. Your squad is full, so whoever you replace goes to the market' : ''}.</p>` : ''}
-    ${buying ? html`<p class="place-prompt">Buying ${charName(state.buyPick)} for ${money(v, TIER_PRICE[tierOf(state.buyPick)])}. Tap who to swap out. <button class="btn btn-small" data-action="cancelBuy">Cancel</button></p>` : ''}
+    ${buying ? html`<p class="place-prompt">Buying ${charName(state.buyPick)} for ${money(v, TIER_PRICE[tierOf(state.buyPick)])}. ${squadFull(v, v.you) ? 'Tap who to swap out' : 'Tap an empty bench spot, or who to swap out'}. <button class="btn btn-small" data-action="cancelBuy">Cancel</button></p>` : ''}
     ${state.moveFrom ? html`<p class="hint">Now tap where they should go.</p>` : ''}
     <ul class="squad">${SLOT_AREAS.map((area) => sq[area].map((_, i) => row(area, i)))}</ul></div>`;
 }
@@ -1789,7 +1817,7 @@ function squadsPanel(v, { trade = false } = {}) {
 
 function marketPanel(v, { trade = false } = {}) {
   const m = v.auction.market;
-  const canBuy = trade && squadFull(v, v.you) && (v.trade.buys[v.you] || 0) < v.trade.buyLimit;
+  const canBuy = trade && rolesFull(v, v.you) && (v.trade.buys[v.you] || 0) < v.trade.buyLimit;
   const sq = squadOf(v, v.you);
   return html`<div class="panel"><h3>Market <small>${m.length}</small></h3>
     ${m.length ? html`<ul class="market-list">${m.map((id) => {
@@ -1797,7 +1825,7 @@ function marketPanel(v, { trade = false } = {}) {
       return html`<li>${chip(id)} <span class="hint">${money(v, price)}</span>
         ${trade ? html`<button class="btn btn-small" data-action="pickBuy" data-id="${id}" ${raw(canBuy && sq && sq.funds >= price ? '' : 'disabled')}>Buy</button>` : ''}</li>`;
     })}</ul>` : html`<p class="hint">Unsold and swapped-out characters land here.</p>`}
-    ${trade ? html`<p class="hint">${squadFull(v, v.you) ? `Bought ${v.trade.buys[v.you] || 0} of ${v.trade.buyLimit}.` : 'Only players with every role and bench spot filled can buy.'} Anyone can sell to the market for half the tier price.</p>` : html`<p class="hint">You can sell from your squad for half the tier price at any time. Buying opens when the auction ends.</p>`}
+    ${trade ? html`<p class="hint">${rolesFull(v, v.you) ? `Bought ${v.trade.buys[v.you] || 0} of ${v.trade.buyLimit}.` : 'Fill every role to buy from the market.'} Anyone can sell to the market for half the tier price.</p>` : html`<p class="hint">You can sell from your squad for half the tier price at any time. Buying opens when the auction ends.</p>`}
   </div>`;
 }
 
@@ -1888,7 +1916,8 @@ function auctionScreen(v) {
       ${me ? html`<p class="tokens"><span>Your funds ${money(v, me.funds)}</span></p>` : ''}
       ${a.stage === 'bidding' && revealed ? countdownFor(lot.deadline, a.bidMs) : a.stage === 'placing' && a.deadline ? countdownFor(a.deadline, a.placementMs) : ''}
     </header>
-    <div class="draft-grid">
+    <div class="draft-grid auction-grid">
+      ${lotPanel(v, revealed)}
       <section class="wheel-col ${(a.stage === 'bidding' && revealed) || a.stage === 'placing' || a.stage === 'result' ? 'wheel-done' : ''}">
         <div id="wheel-slot"></div>
         <div class="action-area">${action}</div>
@@ -1900,6 +1929,25 @@ function auctionScreen(v) {
         ${auctionFeed(v)}
       </section>
     </div>`;
+}
+
+// The auction lot (20 Nov 2026): every character still to come, strongest tier first, so players can plan
+// their budget. Shown on the left on wide screens and below the bidding on phones. While the wheel is still
+// spinning, the character it will land on stays in the list unmarked, so the list never gives the result away.
+const TIER_RANK = { Diamond: 0, Gold: 1, Silver: 2, Bronze: 3 };
+function lotPanel(v, revealed) {
+  const a = v.auction;
+  const now = a.stage === 'bidding' && a.lot ? a.lot.charId : null;
+  const ids = [...a.remaining, ...(now != null && !revealed ? [now] : [])]
+    .sort((x, y) => TIER_RANK[tierOf(x)] - TIER_RANK[tierOf(y)] || String(charName(x)).localeCompare(String(charName(y))));
+  const counts = ids.reduce((m, id) => ({ ...m, [tierOf(id)]: (m[tierOf(id)] || 0) + 1 }), {});
+  const row = (id, extra = '') => html`<li class="lot-row tier-${tierOf(id)} ${extra}"><span class="lot-dot" aria-hidden="true"></span><span class="lot-name">${charName(id)}</span><span class="lot-price">${money(v, TIER_PRICE[tierOf(id)])}</span></li>`;
+  return html`<aside class="lot-col panel" aria-label="Auction lot">
+    <h3>The lot <small>${ids.length} to come</small></h3>
+    <p class="lot-tiers">${['Diamond', 'Gold', 'Silver', 'Bronze'].filter((t) => counts[t]).map((t) => html`<span class="tier-${t}"><span class="lot-dot"></span>${counts[t]}</span>`)}</p>
+    ${now != null && revealed ? html`<p class="lot-now-label">Up now</p><ul class="lot-list">${row(now, 'now')}</ul>` : ''}
+    ${ids.length ? html`<ul class="lot-list">${ids.map((id) => row(id))}</ul>` : html`<p class="hint">That’s the last one.</p>`}
+  </aside>`;
 }
 
 // ---------- trade phase (iteration 2) ----------
@@ -2028,7 +2076,7 @@ function matchView(v) {
   } else if (m.stage === 'voting') {
     status = canVote
       ? html`<button class="btn btn-primary btn-block" data-action="submitVote" ${raw(allPicked ? '' : 'disabled')}>Submit votes</button>
-          ${allPicked ? '' : html`<p class="hint center">Pick a winner in every row.</p>`}`
+          ${allPicked ? '' : html`<p class="hint center">Pick the stronger character in every row.${m.pairings.some((p) => p.traitor && p.auto === null) ? ' In the Traitor row the one you pick loses.' : ''}</p>`}`
       : html`<p class="prompt">${battling ? 'You’re battling, so you sit this vote out.' : m.myBallot ? 'Votes in. Waiting for the others.' : 'Waiting for votes.'} ${m.voted.length}/${m.voters.length} voted.</p>`;
     const still = m.voters.filter((id) => !m.voted.includes(id));
     if (still.length && !canVote) {
@@ -2041,7 +2089,7 @@ function matchView(v) {
   } else if (m.stage === 'judging') {
     const judgeName = pName(v, m.judge.id);
     if (!judging) status = html`<p class="prompt">It’s a tie. ${judgeName} is deciding.</p>`;
-    else if (m.judge.kind === 'pairings') status = html`<p class="prompt">You’re the judge. Pick the winner of each tied row.</p><button class="btn btn-primary btn-block" data-action="submitJudge" ${raw(judgeComplete ? '' : 'disabled')}>Decide</button>`;
+    else if (m.judge.kind === 'pairings') status = html`<p class="prompt">You’re the judge. Pick the stronger character in each tied row${m.pairings.some((p) => p.traitor && m.judge.roles.includes(p.role)) ? ' (in the Traitor row the stronger one loses)' : ''}.</p><button class="btn btn-primary btn-block" data-action="submitJudge" ${raw(judgeComplete ? '' : 'disabled')}>Decide</button>`;
     else status = html`<p class="prompt">You’re the judge. The match is level. Who wins?</p>
       <div class="bail"><button class="btn btn-primary" data-action="submitJudge" data-side="a">${A}</button><button class="btn btn-primary" data-action="submitJudge" data-side="b">${B}</button></div>`;
   } else {
@@ -2060,7 +2108,7 @@ function matchView(v) {
       <table class="pairings">
         <thead><tr><th scope="col">Role</th><th scope="col">${A}</th><th scope="col">${B}</th></tr></thead>
         <tbody>${m.pairings.map((p) => html`<tr>
-          <th scope="row">${roleName(p.role)}${p.auto && p.auto !== 'none' ? html`<small>Automatic</small>` : p.auto === 'none' ? html`<small>No point</small>` : p.judged ? html`<small>Judge’s call</small>` : ''}</th>
+          <th scope="row">${roleName(p.role)}${p.traitor ? html`<small class="traitor-tag">Traitor: stronger loses</small>` : ''}${p.auto && p.auto !== 'none' ? html`<small>Automatic</small>` : p.auto === 'none' ? html`<small>No point</small>` : p.judged ? html`<small>Judge’s call</small>` : ''}</th>
           <td>${cell(p, 'a')}</td><td>${cell(p, 'b')}</td></tr>`)}</tbody>
       </table>
       <div class="match-status">${status}</div>

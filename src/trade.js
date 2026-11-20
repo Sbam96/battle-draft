@@ -3,8 +3,9 @@
 //    One proposal waiting per player at a time; it disappears if declined, cancelled or not answered in 30 s.
 //    On Accept it happens at once, if it is still valid (nothing in it has changed hands, funds and squad
 //    space are there).
-//  - Market: unsold and swapped-out characters. Only a player whose roles and bench are all full can buy,
-//    at the tier price, swapping one out (to the market); at most 2 buys each. Anyone can sell for half the
+//  - Market: unsold and swapped-out characters. Only a player whose roles are all filled can buy (changed
+//    20 Nov 2026; the bench may have gaps), at the tier price, into an empty bench spot or swapping one out
+//    (to the market); at most 2 buys each. Anyone can sell for half the
 //    tier price, rounded half up.
 //  - Players mark "done" (and can change their mind). When everyone is done the tournament starts. The host
 //    can end trading for everyone after 90 seconds. The host can't approve or block trades.
@@ -116,7 +117,7 @@ export class TradePhase {
   buy(pid, charId, swap, now) {
     this.#open();
     const p = this.#player(pid);
-    if (!this.a.isFull(pid)) throw new DraftError('NOT_FULL', 'Only players with every role and bench spot filled can buy from the market.');
+    if (!this.a.rolesFull(pid)) throw new DraftError('NOT_FULL', 'Fill every role before buying from the market.');
     if ((this.buys.get(pid) || 0) >= MARKET_BUY_LIMIT) throw new DraftError('BUY_LIMIT', `You’ve already bought ${MARKET_BUY_LIMIT} from the market.`);
     const at = this.a.market.indexOf(charId);
     if (at === -1) throw new DraftError('GONE', 'Someone else just bought that character.');
@@ -124,10 +125,10 @@ export class TradePhase {
     if (price > p.funds) throw new DraftError('NO_FUNDS', `You need ${price} and have ${p.funds}.`);
     const i = Number(swap?.index);
     const area = swap?.area;
-    if (!['roles', 'bench'].includes(area) || !Number.isInteger(i) || i < 0 || i >= p[area].length) throw new DraftError('BAD_SLOT', 'Pick who to swap out.');
+    if (!['roles', 'bench'].includes(area) || !Number.isInteger(i) || i < 0 || i >= p[area].length) throw new DraftError('BAD_SLOT', 'Pick an empty bench spot or who to swap out.');
     const out = p[area][i];
     this.a.market.splice(at, 1);
-    this.a.market.push(out);
+    if (out != null) this.a.market.push(out);
     p[area][i] = charId;
     p.funds -= price;
     this.buys.set(pid, (this.buys.get(pid) || 0) + 1);

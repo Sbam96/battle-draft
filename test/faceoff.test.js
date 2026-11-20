@@ -7,11 +7,11 @@ const T0 = 1_000_000;
 const code = (fn) => { try { fn(); } catch (e) { return e.code; } return null; };
 
 // players: ids; host: id; teams: optional overrides { A: ['x', null, ...] }
-function setup({ players = ['A', 'B', 'C'], host = players[0], roleCount = 5, teams = {}, random, offline = [], voteSeconds = 0 } = {}) {
+function setup({ players = ['A', 'B', 'C'], host = players[0], roleCount = 5, teams = {}, random, offline = [], voteSeconds = 0, traitorRoles = [] } = {}) {
   const t = new Map(players.map((p) => [p, teams[p] ?? Array.from({ length: roleCount }, (_, i) => `${p}${i}`)]));
   const list = players.map((id) => ({ id, connected: !offline.includes(id) }));
   const ctx = { players: () => list, hostId: () => host };
-  const f = new Faceoff({ order: players, teams: t, roleCount, ctx, voteSeconds, ...(random ? { random } : {}) });
+  const f = new Faceoff({ order: players, teams: t, roleCount, ctx, voteSeconds, traitorRoles, ...(random ? { random } : {}) });
   f.begin(T0);
   return { f, list };
 }
@@ -306,4 +306,46 @@ test('R9 votes stay secret until the match is decided', () => {
   const view = f.view('B');
   assert.ok(view.match.pairings.every((p) => p.votes === null && p.winner === null || p.auto !== null));
   assert.deepEqual(view.match.voted, [v1]);
+});
+
+// ---------- R9.7 Traitor role (20 Nov 2026) ----------
+test('T9.30 Traitor role: the character voted stronger loses that pairing', () => {
+  const { f } = setup({ players: ['A', 'B', 'C'], traitorRoles: [4] });
+  const m = f.match;
+  // the neutral picks side 'a' as stronger in every row
+  voteAll(f, 'a');
+  const traitor = m.pairings[4];
+  assert.equal(traitor.traitor, true);
+  assert.equal(traitor.stronger, 'a');
+  assert.equal(traitor.winner, 'b');
+  assert.ok(m.pairings.slice(0, 4).every((p) => p.winner === 'a'));
+  assert.deepEqual(m.score, { a: 4, b: 1 });
+});
+test('T9.31 Traitor role: an empty Traitor role still loses (a gap never scores)', () => {
+  let p = null;
+  for (let i = 0; i < 50 && !p; i += 1) {
+    const { f } = setup({ players: ['A', 'B', 'C'], traitorRoles: [0], teams: { A: [null, 'A1', 'A2', 'A3', 'A4'] } });
+    const m = f.match;
+    if (m.a === 'A' || m.b === 'A') p = { pairing: m.pairings[0], aSide: m.a === 'A' ? 'a' : 'b' };
+  }
+  assert.ok(p, 'A played a match');
+  assert.notEqual(p.pairing.winner, p.aSide);
+  assert.equal(p.pairing.auto, p.aSide === 'a' ? 'b' : 'a');
+});
+test('T9.31a a role counts as Traitor when its name includes the word', async () => {
+  const { isTraitorRole } = await import('../src/config.js');
+  for (const n of ['Traitor', 'traitor', 'The Traitor', 'Traitors']) assert.equal(isTraitorRole(n), true, n);
+  for (const n of ['Captain', 'Traitorous', 'Portrait', '']) assert.equal(isTraitorRole(n), false, n);
+});
+test('T9.32 Traitor role: a judge breaking a tie picks the stronger, who then loses', () => {
+  const { f } = setup({ players: ['A', 'B', 'C', 'D'], host: 'A', traitorRoles: [0] });
+  const m = f.match;
+  const [v1, v2] = neutrals(f);
+  f.vote(v1, ballot(f, (r) => (r === 0 ? 'a' : 'a')), T0);
+  f.vote(v2, ballot(f, (r) => (r === 0 ? 'b' : 'a')), T0);
+  assert.equal(m.stage, 'judging');
+  assert.deepEqual(m.judge.roles, [0]);
+  f.judge(m.judge.id, { 0: 'a' }, T0);
+  assert.equal(m.pairings[0].stronger, 'a');
+  assert.equal(m.pairings[0].winner, 'b');
 });

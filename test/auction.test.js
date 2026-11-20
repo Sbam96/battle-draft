@@ -47,21 +47,22 @@ test('T14.05 funds outside 50–100 or not a step of 10, and unknown currencies,
   assert.equal(code(() => validateSettings(base({ currency: '₿' }))), 'CURRENCY');
   assert.equal(code(() => validateSettings(base({ gameType: 'poker' }))), 'GAME_TYPE');
 });
-test('T14.09 lot size: 4 players × 5 roles + 20% = 24; 3 × 10 = 36', () => {
-  assert.equal(auctionLotSize(4, 5), 24);
-  assert.equal(auctionLotSize(3, 10), 36);
-  assert.equal(auctionLotSize(3, 5), 18);
+test('T14.09 lot size: roles × players + 30%: 5 × 10 = 65; 4 × 5 = 26; 3 × 10 = 39', () => {
+  assert.equal(auctionLotSize(5, 10), 65);
+  assert.equal(auctionLotSize(4, 5), 26);
+  assert.equal(auctionLotSize(3, 10), 39);
+  assert.equal(auctionLotSize(3, 5), 20);
 });
 test('T14.09a the host can start an auction once the list holds a full lot', () => {
   const r = new Room({ id: 'r', hostName: 'Ste', hostToken: 'h', settings: base() });
   r.join('t2', 'Bee'); r.join('t3', 'Kuma');
-  r.addCharacters(r.hostId, { text: Array.from({ length: 17 }, (_, i) => `C${i}`).join('\n') });
-  assert.match(r.startBlockers()[0], /17 of 18/);
-  r.addCharacters(r.hostId, { text: 'C17' });
+  r.addCharacters(r.hostId, { text: Array.from({ length: 19 }, (_, i) => `C${i}`).join('\n') });
+  assert.match(r.startBlockers()[0], /19 of 20/);
+  r.addCharacters(r.hostId, { text: 'C19' });
   assert.deepEqual(r.startBlockers(), []);
   r.start(r.hostId, Math.random, T0);
   assert.equal(r.phase, 'auction');
-  assert.equal(r.auction.lotTotal, 18);
+  assert.equal(r.auction.lotTotal, 20);
 });
 
 // ---------- R16 auction ----------
@@ -345,10 +346,20 @@ test('T17.13 selling pays half the tier price, rounded half up (4, 3, 2, 1)', ()
   assert.equal(a.players.get('A').funds, 50 + 4 + 3 + 2 + 1);
   assert.ok(['a1', 'a2', 'a3', 'a4'].every((c) => a.market.includes(c)));
 });
-test('T17.14 a player without a full squad cannot buy from the market (but can still trade)', () => {
+test('T17.14 a player with an empty role cannot buy from the market (but can still trade)', () => {
   const { t } = trading();
   assert.equal(code(() => t.buy('C', 'm1', { area: 'roles', index: 1 }, T0)), 'NOT_FULL');
   t.propose('C', 'B', { give: { funds: 1 } }, T0);
+});
+test('T17.14a every role filled but bench gaps: can buy into an empty bench spot, nothing swapped out', () => {
+  const { a, t } = trading(); // B: 5 roles filled, empty bench
+  t.buy('B', 'm2', { area: 'bench', index: 1 }, T0);
+  assert.deepEqual(a.players.get('B').bench, [null, 'm2', null]);
+  assert.equal(a.players.get('B').funds, 49);
+  assert.deepEqual(a.market, ['m1', 'm3']);
+  t.buy('B', 'm1', { area: 'roles', index: 0 }, T0); // or swap a role out
+  assert.equal(a.players.get('B').roles[0], 'm1');
+  assert.ok(a.market.includes('b1'));
 });
 test('T17.16 everyone marks done: trading ends; someone can change their mind first', () => {
   const { t } = trading();
@@ -408,7 +419,7 @@ test('T17.21 play again: a new lot is drawn and funds reset', () => {
   r.restart(r.hostId, Math.random, t + 1000);
   assert.equal(r.phase, 'auction');
   assert.ok([...r.auction.players.values()].every((p) => p.funds === 100));
-  assert.equal(r.auction.lotTotal, 18);
+  assert.equal(r.auction.lotTotal, 20);
 });
 test('R17.9 the host has no special trade powers beyond ending trading', () => {
   const r = auctionRoom();

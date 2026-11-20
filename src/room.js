@@ -1,6 +1,7 @@
 // Room state and rules. Pure logic: no sockets or timers here, so it can be unit-tested.
 // The server calls these methods and schedules timers (grace periods) around them.
 
+import { isTraitorRole } from './config.js';
 import {
   ROLE_COUNTS, MIN_PLAYERS, NAME_MAX, ROLE_NAME_MAX, ROOM_NAME_MAX,
   PLACEMENT_TIMER_OPTIONS, VOTE_TIMER_OPTIONS, maxPlayersFor, minimumPool,
@@ -476,7 +477,7 @@ export class Room {
   }
 
   // ---------- the auction (iteration 2) ----------
-  // R14.7: a random lot of roles x players + 20% from the loaded list.
+  // R14.7: a random lot of roles x players + 30% from the loaded list.
   #startAuction(order, rng, now) {
     const pool = [...this.characters];
     for (let i = pool.length - 1; i > 0; i -= 1) { const j = Math.floor(rng() * (i + 1)); [pool[i], pool[j]] = [pool[j], pool[i]]; }
@@ -577,6 +578,7 @@ export class Room {
         teams,
         roleCount: this.settings.roleCount,
         voteSeconds: this.settings.voteTimerEnabled ? this.settings.voteTimerSeconds : 0,
+        traitorRoles: this.settings.roles.flatMap((name, i) => (isTraitorRole(name) ? [i] : [])),
         ctx: { players: () => this.players.map((p) => ({ id: p.id, connected: p.connected })), hostId: () => this.hostId },
         ...(this.random ? { random: this.random } : {}),
       });
